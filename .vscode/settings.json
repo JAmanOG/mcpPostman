@@ -1,0 +1,4 @@
+{
+    "appService.defaultWebAppToDeploy": "/subscriptions/4455ef65-df49-49ad-aa27-0e2fbd84d36d/resourceGroups/appsvc_linux_centralindia_basic/providers/Microsoft.Web/sites/mcpPostman",
+    "appService.deploySubpath": "."
+}
