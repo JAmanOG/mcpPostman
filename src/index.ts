@@ -1181,7 +1181,7 @@ if (!jwtSecret) {
   );
 }
 
-const PHONE_NUMBER = '+918356965884'
+const PHONE_NUMBER = '918356965884'
 
 
 server.tool(
