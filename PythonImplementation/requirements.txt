@@ -1,5 +1,0 @@
-fastmcp
-redis
-python-dotenv
-httpx
-pydantic
