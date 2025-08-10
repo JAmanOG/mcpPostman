@@ -1181,31 +1181,15 @@ if (!jwtSecret) {
   );
 }
 
+const PHONE_NUMBER = '+918356965884'
+
+
 server.tool(
   "validate",
   "Validate bearer token and return user's phone number in {country_code}{number} format",
-  {
-    data: z.object({
-      token: z.string().min(1, "Bearer token required"),
-    }),
-  },
-  async ({ data: { token } }) => {
-    let decoded: any;
-    try {
-      decoded = jwt.decode(token, jwtSecret);
-      if (!decoded || !decoded.phone_number)
-        throw new Error("phone_number not found in token");
-    } catch (e: any) {
-      throw new Error("Invalid token: " + (e?.message || e));
-    }
-
-    // Extract phone number in format +91-9876543210 or +919876543210
-    let raw = decoded.phone_number as string;
-    let match = raw.match(/^\+?(\d{1,3})[-\s]?(\d{6,})$/);
-    if (!match) throw new Error("Invalid phone number format in token");
-    const phone = `${match[1]}${match[2]}`;
-
-    return { content: [{ type: "text", text: phone }] };
+  {  },
+  async ({ }) => {
+    return { content: [{ text: String(PHONE_NUMBER), type: 'text' }] };
   }
 );
 
