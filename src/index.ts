@@ -1,5 +1,4 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { FastMCP } from "fastmcp";
 import { z } from "zod";
 import { promises as fs } from "fs";
 import path from "path";
@@ -9,9 +8,6 @@ import http, { createServer } from "http";
 import { fileURLToPath } from "url";
 import jwt from "jsonwebtoken";
 import { config } from "dotenv";
-
-config();
-
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -91,6 +87,54 @@ type HistoryEntry = {
   tests?: { name: string; passed: boolean; error?: string }[];
   console?: string[];
 };
+
+const server = new FastMCP({
+    name: "mcp-postman",
+    version: "1.1.0",
+    authenticate: async (request) => {
+      const authHeader = request.headers.authorization;
+      const bearerToken = Array.isArray(authHeader) ? authHeader[0] : authHeader;
+  
+      if (bearerToken?.startsWith("Bearer ")) {
+        const apiKey = bearerToken.slice("Bearer ".length).trim();
+        if (!apiKey) throw new Error("Empty bearer token");
+        return { apiKey };
+      }
+  
+      const apiKeyHeader = request.headers["x-api-key"];
+      const headerApiKey = Array.isArray(apiKeyHeader) ? apiKeyHeader[0] : apiKeyHeader;
+      if (headerApiKey) return { apiKey: headerApiKey };
+  
+      throw new Error("Authentication required: send Authorization: Bearer <token> or x-api-key header");
+    },
+  });
+  
+
+  function adaptTool<Name extends string>(
+    name: string,
+    description: string,
+    schemaObj: Record<string, any>,
+    handler: (args: any, ctx?: { session?: { apiKey?: string } }) => Promise<any>
+  ) {
+    // Determine the single root schema (same shape you used: { data: z.object(...) } or similar)
+    // We simply pass the object schema through.
+    server.addTool({
+      name,
+      description,
+      // FastMCP wants a zod schema; we combine provided root keys into one object
+      parameters: z.object(
+        Object.fromEntries(
+          Object.entries(schemaObj).map(([k, v]) => [k, (v as any)])
+        )
+      ),
+      execute: async (params: any, { session }) => {
+        // Maintain compatibility: if original expected nested keys (e.g. { data: {...} })
+        // we pass through exactly what the original handler received.
+        // Your handlers mostly destructure their root keys; we forward unchanged.
+        return handler(params, { session });
+      },
+    });
+  }
 
 async function ensureDataFiles() {
   await fs.mkdir(DATA_DIR, { recursive: true });
@@ -235,17 +279,8 @@ function findFolder(
   return undefined;
 }
 
-const server = new McpServer({
-  name: "mcp-postman",
-  version: "1.1.0",
-  capabilities: {
-    resources: {},
-    tools: {},
-  },
-});
-
 // Tool: set_globals
-server.tool(
+adaptTool(
   "set_globals",
   "Set or merge global variables",
   { data: z.object({ variables: z.record(z.string()) }) },
@@ -261,7 +296,7 @@ server.tool(
 );
 
 // Tool: get_globals
-server.tool("get_globals", "Get global variables", {}, async () => {
+adaptTool("get_globals", "Get global variables", {}, async () => {
   await ensureDataFiles();
   const globals = JSON.parse(await fs.readFile(GLOBALS_FILE, "utf-8"));
   return {
@@ -269,7 +304,7 @@ server.tool("get_globals", "Get global variables", {}, async () => {
   };
 });
 
-server.tool(
+adaptTool(
   "create_collection",
   "Create a new request collection",
   {
@@ -315,7 +350,7 @@ server.tool(
 );
 
 // Tool: update_collection
-server.tool(
+adaptTool(
   "update_collection",
   "Update collection name/variables/auth/scripts",
   {
@@ -364,7 +399,7 @@ server.tool(
 );
 
 // Tool: delete_collection
-server.tool(
+adaptTool(
   "delete_collection",
   "Delete a collection",
   { data: z.object({ collectionId: z.string() }) },
@@ -386,7 +421,7 @@ server.tool(
 );
 
 // Tool: list_collections (unchanged but uses new shape)
-server.tool("list_collections", "List all collections", {}, async () => {
+adaptTool("list_collections", "List all collections", {}, async () => {
   await ensureDataFiles();
   const collections: Collection[] = JSON.parse(
     await fs.readFile(COLLECTIONS_FILE, "utf-8")
@@ -397,7 +432,7 @@ server.tool("list_collections", "List all collections", {}, async () => {
 });
 
 // Tool: add_folder
-server.tool(
+adaptTool(
   "add_folder",
   "Add a folder to a collection (optionally nested)",
   {
@@ -441,7 +476,7 @@ server.tool(
 );
 
 // Tool: add_request (extended with folder, vars, auth, scripts)
-server.tool(
+adaptTool(
   "add_request",
   "Add a request definition to a collection or folder",
   {
@@ -517,7 +552,7 @@ server.tool(
 );
 
 // Tool: update_request
-server.tool(
+adaptTool(
   "update_request",
   "Update a stored request (searches all folders)",
   {
@@ -592,7 +627,7 @@ server.tool(
 );
 
 // Tool: delete_request
-server.tool(
+adaptTool(
   "delete_request",
   "Delete a stored request",
   { data: z.object({ collectionId: z.string(), requestId: z.string() }) },
@@ -629,7 +664,7 @@ server.tool(
 );
 
 // Tool: list_requests (extended optional folderId)
-server.tool(
+adaptTool(
   "list_requests",
   "List stored requests in a collection or folder",
   {
@@ -661,7 +696,7 @@ server.tool(
 );
 
 // Tool: create_environment
-server.tool(
+adaptTool(
   "create_environment",
   "Create an environment variable set",
   { data: z.object({ name: z.string(), variables: z.record(z.string()) }) },
@@ -683,7 +718,7 @@ server.tool(
 );
 
 // Tool: update_environment
-server.tool(
+adaptTool(
   "update_environment",
   "Update environment variables (merge)",
   {
@@ -706,7 +741,7 @@ server.tool(
 );
 
 // Tool: delete_environment
-server.tool(
+adaptTool(
   "delete_environment",
   "Delete an environment set",
   { data: z.object({ environmentId: z.string() }) },
@@ -724,7 +759,7 @@ server.tool(
 );
 
 // Tool: list_environments
-server.tool("list_environments", "List environments", {}, async () => {
+adaptTool("list_environments", "List environments", {}, async () => {
   await ensureDataFiles();
   const envs: EnvironmentSet[] = JSON.parse(
     await fs.readFile(ENV_FILE, "utf-8")
@@ -733,7 +768,7 @@ server.tool("list_environments", "List environments", {}, async () => {
 });
 
 // Tool: send_request (extended for variables, auth, scripts, folder search)
-server.tool(
+adaptTool(
   "send_request",
   "Send an HTTP request (direct or stored). Applies variable scopes, auth, scripts.",
   {
@@ -999,7 +1034,7 @@ server.tool(
 );
 
 // Tool: history (extended)
-server.tool(
+adaptTool(
   "history",
   "List recent request history",
   {
@@ -1024,7 +1059,7 @@ server.tool(
 );
 
 // Tool: export_collection (Postman v2.1 subset)
-server.tool(
+adaptTool(
   "export_collection",
   "Export a collection to Postman v2.1 JSON (subset)",
   { data: z.object({ collectionId: z.string() }) },
@@ -1097,7 +1132,7 @@ server.tool(
 );
 
 // Tool: import_postman_collection (subset)
-server.tool(
+adaptTool(
   "import_postman_collection",
   "Import a Postman collection v2.1 JSON (subset supported)",
   { data: z.object({ json: z.string() }) },
@@ -1174,90 +1209,34 @@ server.tool(
   }
 );
 
-const jwtSecret: any = process.env.JWT_SECRET || "";
-if (!jwtSecret) {
-  console.error(
-    "JWT_SECRET environment variable is not set, bearer token validation will not work"
-  );
-}
 
-const PHONE_NUMBER = '918356965884'
+const PHONE_NUMBER = '918356965884' // just testing
 
 
-server.tool(
-  "validate",
-  "Validate bearer token and return user's phone number in {country_code}{number} format",
-  {  },
-  async ({ }) => {
-    return { content: [{ text: String(PHONE_NUMBER), type: 'text' }] };
-  }
-);
+adaptTool("validate", "Validated this mcp server to be used by PuchAI", {}, async () => ({
+  content: [{ text: String(PHONE_NUMBER), type: "text" }],
+}));
+
+server.addTool({
+    name: "whoami",
+    description: "Return the authenticated API key (debug).",
+    parameters: z.object({}),
+    execute: async (_args, { session }) => {
+      if (!session?.apiKey) throw new Error("Not authenticated");
+      return JSON.stringify({ apiKey: session.apiKey });
+    },
+  });
+  
+    
 
 // Start the MCP server
-async function main() {
-  await ensureDataFiles();
-  const transport = new StdioServerTransport();
 
-  // Prevent premature exit if stdin closes in Azure environment
-  if (process.stdin) {
-    process.stdin.on("end", () => {
-      console.error("[lifecycle] stdin ended (ignoring to keep server alive)");
-    });
-    process.stdin.on("close", () => {
-      console.error(
-        "[lifecycle] stdin closed (ignoring to keep server running)"
-      );
-    });
-  }
-
-  await server.connect(transport);
-  console.error("MCP server started on stdin/stdout transport");
-
-  const rawPort = process.env.PORT || process.env.WEBSITE_PORT || "3000";
-  if (Number.isNaN(rawPort)) {
-    console.error(`Invalid port value "${rawPort}", defaulting to 3000`);
-  }
-  const serverHttp = createServer((req, res) => {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("MCP Postman server is running");
+server.start({
+    transportType: "httpStream",
+    httpStream: {
+      endpoint: "/mcp",
+      port: Number(process.env.PORT || 5000),
+    },
   });
-  serverHttp.listen(rawPort, () => {
-    console.error(`[lifecycle] HTTP server listening on port ${rawPort}`);
-  });
-  // Global error handlers
-  process.on("uncaughtException", (err) => {
-    console.error("[fatal] uncaughtException", err);
-  });
-  process.on("unhandledRejection", (reason) => {
-    console.error("[fatal] unhandledRejection", reason);
-  });
-
-  // Graceful shutdown
-  const shutdown = (signal: string) => {
-    console.error(
-      `[lifecycle] Received ${signal}, shutting down gracefully...`
-    );
-    serverHttp.close(() => {
-      console.error("[lifecycle] HTTP server closed");
-      // Delay a bit to flush logs
-      setTimeout(() => process.exit(0), 200);
-    });
-    // Fallback force exit
-    setTimeout(() => {
-      console.error("[lifecycle] Force exit after timeout");
-      process.exit(1);
-    }, 5000).unref();
-  };
-  ["SIGTERM", "SIGINT"].forEach((sig) => process.on(sig, () => shutdown(sig)));
-
-  // Keep-alive heartbeat (covers edge case where event loop empties)
-  const heartbeat = setInterval(() => {
-    console.error(`[heartbeat] ${new Date().toISOString()}`);
-  }, 60_000);
-  heartbeat.unref();
-}
-
-main().catch((err) => {
-  console.error("Fatal startup error:", err);
-  process.exit(1);
-});
+  
+  console.error("FastMCP HTTP server with bearer auth running");
