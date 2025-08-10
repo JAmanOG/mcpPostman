@@ -7,7 +7,7 @@ import crypto from "crypto";
 import vm from "vm";
 import http from "http";
 import { fileURLToPath } from "url";
-import express from 'express';
+import express from "express";
 import jwt from "jsonwebtoken";
 import { config } from "dotenv";
 
@@ -124,7 +124,10 @@ function genId() {
 }
 
 // Variable resolution across scopes: local > request > collection > environment > global
-function resolveVariables(raw: string, scopes: Record<string, string>[]): string {
+function resolveVariables(
+  raw: string,
+  scopes: Record<string, string>[]
+): string {
   return raw.replace(/\{\{(\w+)\}\}/g, (_, key) => {
     for (const scope of scopes) if (key in scope) return scope[key];
     return `{{${key}}}`; // leave unresolved
@@ -143,11 +146,20 @@ function deepApply(obj: any, scopes: Record<string, string>[]): any {
   return obj;
 }
 
-function applyAuth(headers: Record<string, string>, auth?: AuthConfig): Record<string, string> {
+function applyAuth(
+  headers: Record<string, string>,
+  auth?: AuthConfig
+): Record<string, string> {
   if (!auth) return headers;
   const h = { ...headers };
-  if (auth.type === "basic" && auth.username !== undefined && auth.password !== undefined) {
-    const token = Buffer.from(`${auth.username}:${auth.password}`).toString("base64");
+  if (
+    auth.type === "basic" &&
+    auth.username !== undefined &&
+    auth.password !== undefined
+  ) {
+    const token = Buffer.from(`${auth.username}:${auth.password}`).toString(
+      "base64"
+    );
     h["Authorization"] = `Basic ${token}`;
   } else if (auth.type === "bearer" && auth.token) {
     h["Authorization"] = `Bearer ${auth.token}`;
@@ -176,21 +188,46 @@ function runScript(
     test: (name: string, cond: any) => {
       try {
         const passed = !!cond;
-        contextData.tests.push({ name, passed, ...(passed ? {} : { error: "Assertion failed" }) });
+        contextData.tests.push({
+          name,
+          passed,
+          ...(passed ? {} : { error: "Assertion failed" }),
+        });
       } catch (e: any) {
-        contextData.tests.push({ name, passed: false, error: e?.message || "error" });
+        contextData.tests.push({
+          name,
+          passed: false,
+          error: e?.message || "error",
+        });
       }
     },
-    console: { log: (...args: any[]) => contextData.console.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ")) },
+    console: {
+      log: (...args: any[]) =>
+        contextData.console.push(
+          args
+            .map((a) => (typeof a === "string" ? a : JSON.stringify(a)))
+            .join(" ")
+        ),
+    },
   };
   try {
-    vm.runInNewContext(source, sandbox, { timeout: 100, microtaskMode: "afterEvaluate" });
+    vm.runInNewContext(source, sandbox, {
+      timeout: 100,
+      microtaskMode: "afterEvaluate",
+    });
   } catch (e: any) {
-    contextData.tests.push({ name: `${label} script error`, passed: false, error: e?.message || String(e) });
+    contextData.tests.push({
+      name: `${label} script error`,
+      passed: false,
+      error: e?.message || String(e),
+    });
   }
 }
 
-function findFolder(collection: Collection, folderId: string): Folder | undefined {
+function findFolder(
+  collection: Collection,
+  folderId: string
+): Folder | undefined {
   const stack: Folder[] = [...(collection.folders || [])];
   while (stack.length) {
     const f = stack.pop()!;
@@ -219,21 +256,20 @@ server.tool(
     const globals = JSON.parse(await fs.readFile(GLOBALS_FILE, "utf-8"));
     globals.variables = { ...(globals.variables || {}), ...variables };
     await fs.writeFile(GLOBALS_FILE, JSON.stringify(globals, null, 2), "utf-8");
-    return { content: [{ type: "text", text: JSON.stringify(globals, null, 2) }] };
+    return {
+      content: [{ type: "text", text: JSON.stringify(globals, null, 2) }],
+    };
   }
 );
 
 // Tool: get_globals
-server.tool(
-  "get_globals",
-  "Get global variables",
-  {},
-  async () => {
-    await ensureDataFiles();
-    const globals = JSON.parse(await fs.readFile(GLOBALS_FILE, "utf-8"));
-    return { content: [{ type: "text", text: JSON.stringify(globals, null, 2) }] };
-  }
-);
+server.tool("get_globals", "Get global variables", {}, async () => {
+  await ensureDataFiles();
+  const globals = JSON.parse(await fs.readFile(GLOBALS_FILE, "utf-8"));
+  return {
+    content: [{ type: "text", text: JSON.stringify(globals, null, 2) }],
+  };
+});
 
 server.tool(
   "create_collection",
@@ -242,14 +278,23 @@ server.tool(
     name: z.object({
       name: z.string().min(1),
       variables: z.record(z.string()).optional(),
-      auth: z.object({ type: z.enum(["basic", "bearer"]), username: z.string().optional(), password: z.string().optional(), token: z.string().optional() }).optional(),
+      auth: z
+        .object({
+          type: z.enum(["basic", "bearer"]),
+          username: z.string().optional(),
+          password: z.string().optional(),
+          token: z.string().optional(),
+        })
+        .optional(),
       preRequestScript: z.string().optional(),
       testScript: z.string().optional(),
     }),
   },
   async ({ name: { name, variables, auth, preRequestScript, testScript } }) => {
     await ensureDataFiles();
-    const collections: Collection[] = JSON.parse(await fs.readFile(COLLECTIONS_FILE, "utf-8"));
+    const collections: Collection[] = JSON.parse(
+      await fs.readFile(COLLECTIONS_FILE, "utf-8")
+    );
     const col: Collection = {
       id: genId(),
       name,
@@ -262,7 +307,11 @@ server.tool(
       testScript,
     };
     collections.push(col);
-    await fs.writeFile(COLLECTIONS_FILE, JSON.stringify(collections, null, 2), "utf-8");
+    await fs.writeFile(
+      COLLECTIONS_FILE,
+      JSON.stringify(collections, null, 2),
+      "utf-8"
+    );
     return { content: [{ type: "text", text: JSON.stringify(col, null, 2) }] };
   }
 );
@@ -276,14 +325,26 @@ server.tool(
       collectionId: z.string(),
       name: z.string().optional(),
       variables: z.record(z.string()).optional(),
-      auth: z.object({ type: z.enum(["basic", "bearer"]), username: z.string().optional(), password: z.string().optional(), token: z.string().optional() }).optional().nullable(),
+      auth: z
+        .object({
+          type: z.enum(["basic", "bearer"]),
+          username: z.string().optional(),
+          password: z.string().optional(),
+          token: z.string().optional(),
+        })
+        .optional()
+        .nullable(),
       preRequestScript: z.string().optional().nullable(),
       testScript: z.string().optional().nullable(),
     }),
   },
-  async ({ data: { collectionId, name, variables, auth, preRequestScript, testScript } }) => {
+  async ({
+    data: { collectionId, name, variables, auth, preRequestScript, testScript },
+  }) => {
     await ensureDataFiles();
-    const collections: Collection[] = JSON.parse(await fs.readFile(COLLECTIONS_FILE, "utf-8"));
+    const collections: Collection[] = JSON.parse(
+      await fs.readFile(COLLECTIONS_FILE, "utf-8")
+    );
     const col = collections.find((c) => c.id === collectionId);
     if (!col) throw new Error("Collection not found");
     if (name) col.name = name;
@@ -291,10 +352,15 @@ server.tool(
     if (auth === null) delete col.auth;
     else if (auth) col.auth = auth;
     if (preRequestScript === null) delete col.preRequestScript;
-    else if (preRequestScript !== undefined) col.preRequestScript = preRequestScript;
+    else if (preRequestScript !== undefined)
+      col.preRequestScript = preRequestScript;
     if (testScript === null) delete col.testScript;
     else if (testScript !== undefined) col.testScript = testScript;
-    await fs.writeFile(COLLECTIONS_FILE, JSON.stringify(collections, null, 2), "utf-8");
+    await fs.writeFile(
+      COLLECTIONS_FILE,
+      JSON.stringify(collections, null, 2),
+      "utf-8"
+    );
     return { content: [{ type: "text", text: JSON.stringify(col, null, 2) }] };
   }
 );
@@ -306,38 +372,57 @@ server.tool(
   { data: z.object({ collectionId: z.string() }) },
   async ({ data: { collectionId } }) => {
     await ensureDataFiles();
-    let collections: Collection[] = JSON.parse(await fs.readFile(COLLECTIONS_FILE, "utf-8"));
+    let collections: Collection[] = JSON.parse(
+      await fs.readFile(COLLECTIONS_FILE, "utf-8")
+    );
     const before = collections.length;
     collections = collections.filter((c) => c.id !== collectionId);
     if (collections.length === before) throw new Error("Collection not found");
-    await fs.writeFile(COLLECTIONS_FILE, JSON.stringify(collections, null, 2), "utf-8");
+    await fs.writeFile(
+      COLLECTIONS_FILE,
+      JSON.stringify(collections, null, 2),
+      "utf-8"
+    );
     return { content: [{ type: "text", text: "Deleted" }] };
   }
 );
 
 // Tool: list_collections (unchanged but uses new shape)
-server.tool(
-  "list_collections",
-  "List all collections",
-  {},
-  async () => {
-    await ensureDataFiles();
-    const collections: Collection[] = JSON.parse(await fs.readFile(COLLECTIONS_FILE, "utf-8"));
-    return { content: [{ type: "text", text: JSON.stringify(collections, null, 2) }] };
-  }
-);
+server.tool("list_collections", "List all collections", {}, async () => {
+  await ensureDataFiles();
+  const collections: Collection[] = JSON.parse(
+    await fs.readFile(COLLECTIONS_FILE, "utf-8")
+  );
+  return {
+    content: [{ type: "text", text: JSON.stringify(collections, null, 2) }],
+  };
+});
 
 // Tool: add_folder
 server.tool(
   "add_folder",
   "Add a folder to a collection (optionally nested)",
-  { data: z.object({ collectionId: z.string(), parentFolderId: z.string().optional(), name: z.string() }) },
+  {
+    data: z.object({
+      collectionId: z.string(),
+      parentFolderId: z.string().optional(),
+      name: z.string(),
+    }),
+  },
   async ({ data: { collectionId, parentFolderId, name } }) => {
     await ensureDataFiles();
-    const collections: Collection[] = JSON.parse(await fs.readFile(COLLECTIONS_FILE, "utf-8"));
+    const collections: Collection[] = JSON.parse(
+      await fs.readFile(COLLECTIONS_FILE, "utf-8")
+    );
     const col = collections.find((c) => c.id === collectionId);
     if (!col) throw new Error("Collection not found");
-    const folder: Folder = { id: genId(), name, requests: [], folders: [], createdAt: new Date().toISOString() };
+    const folder: Folder = {
+      id: genId(),
+      name,
+      requests: [],
+      folders: [],
+      createdAt: new Date().toISOString(),
+    };
     if (parentFolderId) {
       const parent = findFolder(col, parentFolderId);
       if (!parent) throw new Error("Parent folder not found");
@@ -346,8 +431,14 @@ server.tool(
       col.folders = col.folders || [];
       col.folders.push(folder);
     }
-    await fs.writeFile(COLLECTIONS_FILE, JSON.stringify(collections, null, 2), "utf-8");
-    return { content: [{ type: "text", text: JSON.stringify(folder, null, 2) }] };
+    await fs.writeFile(
+      COLLECTIONS_FILE,
+      JSON.stringify(collections, null, 2),
+      "utf-8"
+    );
+    return {
+      content: [{ type: "text", text: JSON.stringify(folder, null, 2) }],
+    };
   }
 );
 
@@ -360,19 +451,42 @@ server.tool(
       collectionId: z.string(),
       folderId: z.string().optional(),
       name: z.string(),
-      method: z.string().toUpperCase(),
+      method: z.string().transform((s) => s.toUpperCase()),
       url: z.string(),
       headers: z.record(z.string()).default({}),
       body: z.any().optional(),
       variables: z.record(z.string()).optional(),
-      auth: z.object({ type: z.enum(["basic", "bearer"]), username: z.string().optional(), password: z.string().optional(), token: z.string().optional() }).optional(),
+      auth: z
+        .object({
+          type: z.enum(["basic", "bearer"]),
+          username: z.string().optional(),
+          password: z.string().optional(),
+          token: z.string().optional(),
+        })
+        .optional(),
       preRequestScript: z.string().optional(),
       testScript: z.string().optional(),
     }),
   },
-  async ({ data: { collectionId, folderId, name, method, url, headers, body, variables, auth, preRequestScript, testScript } }) => {
+  async ({
+    data: {
+      collectionId,
+      folderId,
+      name,
+      method,
+      url,
+      headers,
+      body,
+      variables,
+      auth,
+      preRequestScript,
+      testScript,
+    },
+  }) => {
     await ensureDataFiles();
-    const collections: Collection[] = JSON.parse(await fs.readFile(COLLECTIONS_FILE, "utf-8"));
+    const collections: Collection[] = JSON.parse(
+      await fs.readFile(COLLECTIONS_FILE, "utf-8")
+    );
     const col = collections.find((c) => c.id === collectionId);
     if (!col) throw new Error("Collection not found");
     const req: StoredRequest = {
@@ -395,7 +509,11 @@ server.tool(
     } else {
       col.requests.push(req);
     }
-    await fs.writeFile(COLLECTIONS_FILE, JSON.stringify(collections, null, 2), "utf-8");
+    await fs.writeFile(
+      COLLECTIONS_FILE,
+      JSON.stringify(collections, null, 2),
+      "utf-8"
+    );
     return { content: [{ type: "text", text: JSON.stringify(req, null, 2) }] };
   }
 );
@@ -409,19 +527,32 @@ server.tool(
       collectionId: z.string(),
       requestId: z.string(),
       name: z.string().optional(),
-      method: z.string().optional(),
+      method: z
+        .string()
+        .transform((s) => s.toUpperCase())
+        .optional(),
       url: z.string().optional(),
       headers: z.record(z.string()).optional(),
       body: z.any().optional(),
       variables: z.record(z.string()).optional(),
-      auth: z.object({ type: z.enum(["basic", "bearer"]), username: z.string().optional(), password: z.string().optional(), token: z.string().optional() }).optional().nullable(),
+      auth: z
+        .object({
+          type: z.enum(["basic", "bearer"]),
+          username: z.string().optional(),
+          password: z.string().optional(),
+          token: z.string().optional(),
+        })
+        .optional()
+        .nullable(),
       preRequestScript: z.string().optional().nullable(),
       testScript: z.string().optional().nullable(),
     }),
   },
   async ({ data }) => {
     await ensureDataFiles();
-    const collections: Collection[] = JSON.parse(await fs.readFile(COLLECTIONS_FILE, "utf-8"));
+    const collections: Collection[] = JSON.parse(
+      await fs.readFile(COLLECTIONS_FILE, "utf-8")
+    );
     const col = collections.find((c) => c.id === data.collectionId);
     if (!col) throw new Error("Collection not found");
     const allRequestArrays: StoredRequest[][] = [col.requests];
@@ -442,15 +573,23 @@ server.tool(
     if (data.url) target.url = data.url;
     if (data.headers) target.headers = data.headers;
     if (data.body !== undefined) target.body = data.body;
-    if (data.variables) target.variables = { ...(target.variables || {}), ...data.variables };
+    if (data.variables)
+      target.variables = { ...(target.variables || {}), ...data.variables };
     if (data.auth === null) delete target.auth;
     else if (data.auth) target.auth = data.auth;
     if (data.preRequestScript === null) delete target.preRequestScript;
-    else if (data.preRequestScript !== undefined) target.preRequestScript = data.preRequestScript;
+    else if (data.preRequestScript !== undefined)
+      target.preRequestScript = data.preRequestScript;
     if (data.testScript === null) delete target.testScript;
     else if (data.testScript !== undefined) target.testScript = data.testScript;
-    await fs.writeFile(COLLECTIONS_FILE, JSON.stringify(collections, null, 2), "utf-8");
-    return { content: [{ type: "text", text: JSON.stringify(target, null, 2) }] };
+    await fs.writeFile(
+      COLLECTIONS_FILE,
+      JSON.stringify(collections, null, 2),
+      "utf-8"
+    );
+    return {
+      content: [{ type: "text", text: JSON.stringify(target, null, 2) }],
+    };
   }
 );
 
@@ -461,7 +600,9 @@ server.tool(
   { data: z.object({ collectionId: z.string(), requestId: z.string() }) },
   async ({ data: { collectionId, requestId } }) => {
     await ensureDataFiles();
-    const collections: Collection[] = JSON.parse(await fs.readFile(COLLECTIONS_FILE, "utf-8"));
+    const collections: Collection[] = JSON.parse(
+      await fs.readFile(COLLECTIONS_FILE, "utf-8")
+    );
     const col = collections.find((c) => c.id === collectionId);
     if (!col) throw new Error("Collection not found");
     let removed = false;
@@ -480,7 +621,11 @@ server.tool(
       stack.push(...f.folders);
     }
     if (!removed) throw new Error("Request not found");
-    await fs.writeFile(COLLECTIONS_FILE, JSON.stringify(collections, null, 2), "utf-8");
+    await fs.writeFile(
+      COLLECTIONS_FILE,
+      JSON.stringify(collections, null, 2),
+      "utf-8"
+    );
     return { content: [{ type: "text", text: "Deleted" }] };
   }
 );
@@ -489,18 +634,31 @@ server.tool(
 server.tool(
   "list_requests",
   "List stored requests in a collection or folder",
-  { data: z.object({ collectionId: z.string(), folderId: z.string().optional() }) },
+  {
+    data: z.object({
+      collectionId: z.string(),
+      folderId: z.string().optional(),
+    }),
+  },
   async ({ data: { collectionId, folderId } }) => {
     await ensureDataFiles();
-    const collections: Collection[] = JSON.parse(await fs.readFile(COLLECTIONS_FILE, "utf-8"));
+    const collections: Collection[] = JSON.parse(
+      await fs.readFile(COLLECTIONS_FILE, "utf-8")
+    );
     const col = collections.find((c) => c.id === collectionId);
     if (!col) throw new Error("Collection not found");
     if (folderId) {
       const folder = findFolder(col, folderId);
       if (!folder) throw new Error("Folder not found");
-      return { content: [{ type: "text", text: JSON.stringify(folder.requests, null, 2) }] };
+      return {
+        content: [
+          { type: "text", text: JSON.stringify(folder.requests, null, 2) },
+        ],
+      };
     }
-    return { content: [{ type: "text", text: JSON.stringify(col.requests, null, 2) }] };
+    return {
+      content: [{ type: "text", text: JSON.stringify(col.requests, null, 2) }],
+    };
   }
 );
 
@@ -511,8 +669,15 @@ server.tool(
   { data: z.object({ name: z.string(), variables: z.record(z.string()) }) },
   async ({ data: { name, variables } }) => {
     await ensureDataFiles();
-    const envs: EnvironmentSet[] = JSON.parse(await fs.readFile(ENV_FILE, "utf-8"));
-    const env: EnvironmentSet = { id: genId(), name, variables, createdAt: new Date().toISOString() };
+    const envs: EnvironmentSet[] = JSON.parse(
+      await fs.readFile(ENV_FILE, "utf-8")
+    );
+    const env: EnvironmentSet = {
+      id: genId(),
+      name,
+      variables,
+      createdAt: new Date().toISOString(),
+    };
     envs.push(env);
     await fs.writeFile(ENV_FILE, JSON.stringify(envs, null, 2), "utf-8");
     return { content: [{ type: "text", text: JSON.stringify(env, null, 2) }] };
@@ -523,10 +688,17 @@ server.tool(
 server.tool(
   "update_environment",
   "Update environment variables (merge)",
-  { data: z.object({ environmentId: z.string(), variables: z.record(z.string()) }) },
+  {
+    data: z.object({
+      environmentId: z.string(),
+      variables: z.record(z.string()),
+    }),
+  },
   async ({ data: { environmentId, variables } }) => {
     await ensureDataFiles();
-    const envs: EnvironmentSet[] = JSON.parse(await fs.readFile(ENV_FILE, "utf-8"));
+    const envs: EnvironmentSet[] = JSON.parse(
+      await fs.readFile(ENV_FILE, "utf-8")
+    );
     const env = envs.find((e) => e.id === environmentId);
     if (!env) throw new Error("Environment not found");
     env.variables = { ...env.variables, ...variables };
@@ -542,7 +714,9 @@ server.tool(
   { data: z.object({ environmentId: z.string() }) },
   async ({ data: { environmentId } }) => {
     await ensureDataFiles();
-    let envs: EnvironmentSet[] = JSON.parse(await fs.readFile(ENV_FILE, "utf-8"));
+    let envs: EnvironmentSet[] = JSON.parse(
+      await fs.readFile(ENV_FILE, "utf-8")
+    );
     const before = envs.length;
     envs = envs.filter((e) => e.id !== environmentId);
     if (envs.length === before) throw new Error("Environment not found");
@@ -552,39 +726,63 @@ server.tool(
 );
 
 // Tool: list_environments
-server.tool(
-  "list_environments",
-  "List environments",
-  {},
-  async () => {
-    await ensureDataFiles();
-    const envs: EnvironmentSet[] = JSON.parse(await fs.readFile(ENV_FILE, "utf-8"));
-    return { content: [{ type: "text", text: JSON.stringify(envs, null, 2) }] };
-  }
-);
+server.tool("list_environments", "List environments", {}, async () => {
+  await ensureDataFiles();
+  const envs: EnvironmentSet[] = JSON.parse(
+    await fs.readFile(ENV_FILE, "utf-8")
+  );
+  return { content: [{ type: "text", text: JSON.stringify(envs, null, 2) }] };
+});
 
 // Tool: send_request (extended for variables, auth, scripts, folder search)
 server.tool(
   "send_request",
   "Send an HTTP request (direct or stored). Applies variable scopes, auth, scripts.",
   {
-    data: z.object({
-      method: z.string().optional(),
-      url: z.string().optional(),
-      headers: z.record(z.string()).optional(),
-      body: z.any().optional(),
-      storedRequestId: z.string().optional(),
-      collectionId: z.string().optional(),
-      environmentId: z.string().optional(),
-      localVariables: z.record(z.string()).optional(),
-      auth: z.object({ type: z.enum(["basic", "bearer"]), username: z.string().optional(), password: z.string().optional(), token: z.string().optional() }).optional(),
-      timeoutMs: z.number().int().positive().max(120000).default(30000),
-    }).refine(
-      (data) => (data.storedRequestId && data.collectionId) || (data.method && data.url),
-      { message: "Either provide storedRequestId + collectionId OR method + url" }
-    ),
+    data: z
+      .object({
+        method: z.string().optional(),
+        url: z.string().optional(),
+        headers: z.record(z.string()).optional(),
+        body: z.any().optional(),
+        storedRequestId: z.string().optional(),
+        collectionId: z.string().optional(),
+        environmentId: z.string().optional(),
+        localVariables: z.record(z.string()).optional(),
+        auth: z
+          .object({
+            type: z.enum(["basic", "bearer"]),
+            username: z.string().optional(),
+            password: z.string().optional(),
+            token: z.string().optional(),
+          })
+          .optional(),
+        timeoutMs: z.number().int().positive().max(120000).default(30000),
+      })
+      .refine(
+        (data) =>
+          (data.storedRequestId && data.collectionId) ||
+          (data.method && data.url),
+        {
+          message:
+            "Either provide storedRequestId + collectionId OR method + url",
+        }
+      ),
   },
-  async ({ data: { method, url, headers, body, storedRequestId, collectionId, environmentId, localVariables, auth, timeoutMs } }) => {
+  async ({
+    data: {
+      method,
+      url,
+      headers,
+      body,
+      storedRequestId,
+      collectionId,
+      environmentId,
+      localVariables,
+      auth,
+      timeoutMs,
+    },
+  }) => {
     await ensureDataFiles();
     const globals = JSON.parse(await fs.readFile(GLOBALS_FILE, "utf-8"));
     let request: StoredRequest;
@@ -592,7 +790,9 @@ server.tool(
     let envVars: Record<string, string> = {};
 
     if (storedRequestId) {
-      const collections: Collection[] = JSON.parse(await fs.readFile(COLLECTIONS_FILE, "utf-8"));
+      const collections: Collection[] = JSON.parse(
+        await fs.readFile(COLLECTIONS_FILE, "utf-8")
+      );
       collection = collections.find((c) => c.id === collectionId);
       if (!collection) throw new Error("Collection not found");
       // search root and folders
@@ -624,7 +824,9 @@ server.tool(
     }
 
     if (environmentId) {
-      const envs: EnvironmentSet[] = JSON.parse(await fs.readFile(ENV_FILE, "utf-8"));
+      const envs: EnvironmentSet[] = JSON.parse(
+        await fs.readFile(ENV_FILE, "utf-8")
+      );
       const env = envs.find((e) => e.id === environmentId);
       if (!env) throw new Error("Environment not found");
       envVars = env.variables;
@@ -635,16 +837,40 @@ server.tool(
     const collectionVars = collection?.variables || {};
     const globalVars = globals.variables || {};
 
-    const variableChain = [localVars, requestVars, collectionVars, envVars, globalVars];
+    const variableChain = [
+      localVars,
+      requestVars,
+      collectionVars,
+      envVars,
+      globalVars,
+    ];
 
     // Pre-request scripts (collection then request)
     const tests: { name: string; passed: boolean; error?: string }[] = [];
     const consoleLogs: string[] = [];
-    if (collection?.preRequestScript) runScript("collection pre-request", collection.preRequestScript, { request, variables: localVars, tests, console: consoleLogs });
-    if (request.preRequestScript) runScript("request pre-request", request.preRequestScript, { request, variables: localVars, tests, console: consoleLogs });
+    if (collection?.preRequestScript)
+      runScript("collection pre-request", collection.preRequestScript, {
+        request,
+        variables: localVars,
+        tests,
+        console: consoleLogs,
+      });
+    if (request.preRequestScript)
+      runScript("request pre-request", request.preRequestScript, {
+        request,
+        variables: localVars,
+        tests,
+        console: consoleLogs,
+      });
 
     // After pre-request scripts, variable chain may have new local vars
-    const finalVariableChain = [localVars, requestVars, collectionVars, envVars, globalVars];
+    const finalVariableChain = [
+      localVars,
+      requestVars,
+      collectionVars,
+      envVars,
+      globalVars,
+    ];
 
     // Apply variable substitution to request clone
     const reqResolved = {
@@ -663,13 +889,30 @@ server.tool(
     const started = performance.now();
     let responseObj: any;
     try {
-      const fetchOpts: any = { method: reqResolved.method, headers: headersWithAuth, signal: controller.signal };
-      if (reqResolved.body !== undefined && reqResolved.body !== null && reqResolved.method !== "GET") {
-        if (typeof reqResolved.body === "object" && !Array.isArray(reqResolved.body)) {
-          fetchOpts.headers = { "Content-Type": "application/json", ...fetchOpts.headers };
+      const fetchOpts: any = {
+        method: reqResolved.method,
+        headers: headersWithAuth,
+        signal: controller.signal,
+      };
+      if (
+        reqResolved.body !== undefined &&
+        reqResolved.body !== null &&
+        reqResolved.method !== "GET"
+      ) {
+        if (
+          typeof reqResolved.body === "object" &&
+          !Array.isArray(reqResolved.body)
+        ) {
+          fetchOpts.headers = {
+            "Content-Type": "application/json",
+            ...fetchOpts.headers,
+          };
           fetchOpts.body = JSON.stringify(reqResolved.body);
         } else {
-          fetchOpts.body = typeof reqResolved.body === 'string' ? reqResolved.body : JSON.stringify(reqResolved.body);
+          fetchOpts.body =
+            typeof reqResolved.body === "string"
+              ? reqResolved.body
+              : JSON.stringify(reqResolved.body);
         }
       }
       const res = await fetch(reqResolved.url, fetchOpts);
@@ -681,24 +924,79 @@ server.tool(
         parsed = resText;
       }
       const resHeaders: Record<string, string> = {};
-      res.headers.forEach((v, k) => resHeaders[k] = v);
-      responseObj = { status: res.status, statusText: res.statusText, headers: resHeaders, body: parsed };
+      res.headers.forEach((v, k) => (resHeaders[k] = v));
+      responseObj = {
+        status: res.status,
+        statusText: res.statusText,
+        headers: resHeaders,
+        body: parsed,
+      };
     } finally {
       clearTimeout(timer);
     }
 
     // Test scripts
-    if (collection?.testScript) runScript("collection test", collection.testScript, { request: reqResolved, response: responseObj, variables: localVars, tests, console: consoleLogs });
-    if (request.testScript) runScript("request test", request.testScript, { request: reqResolved, response: responseObj, variables: localVars, tests, console: consoleLogs });
+    if (collection?.testScript)
+      runScript("collection test", collection.testScript, {
+        request: reqResolved,
+        response: responseObj,
+        variables: localVars,
+        tests,
+        console: consoleLogs,
+      });
+    if (request.testScript)
+      runScript("request test", request.testScript, {
+        request: reqResolved,
+        response: responseObj,
+        variables: localVars,
+        tests,
+        console: consoleLogs,
+      });
 
     // Persist history
     const elapsed = performance.now();
-    const history: HistoryEntry[] = JSON.parse(await fs.readFile(HISTORY_FILE, "utf-8"));
-    history.unshift({ id: genId(), request: { method: reqResolved.method, url: reqResolved.url, headers: headersWithAuth, body: reqResolved.body }, response: responseObj || { status: 0, statusText: "ABORTED", headers: {}, body: null }, startedAt: new Date().toISOString(), durationMs: Math.round(elapsed), tests, console: consoleLogs });
+    const history: HistoryEntry[] = JSON.parse(
+      await fs.readFile(HISTORY_FILE, "utf-8")
+    );
+    history.unshift({
+      id: genId(),
+      request: {
+        method: reqResolved.method,
+        url: reqResolved.url,
+        headers: headersWithAuth,
+        body: reqResolved.body,
+      },
+      response: responseObj || {
+        status: 0,
+        statusText: "ABORTED",
+        headers: {},
+        body: null,
+      },
+      startedAt: new Date().toISOString(),
+      durationMs: Math.round(elapsed),
+      tests,
+      console: consoleLogs,
+    });
     while (history.length > 200) history.pop();
     await fs.writeFile(HISTORY_FILE, JSON.stringify(history, null, 2), "utf-8");
 
-    return { content: [{ type: "text", text: JSON.stringify({ response: responseObj, tests, console: consoleLogs, resolvedUrl: reqResolved.url }, null, 2) }] };
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              response: responseObj,
+              tests,
+              console: consoleLogs,
+              resolvedUrl: reqResolved.url,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
   }
 );
 
@@ -706,11 +1004,24 @@ server.tool(
 server.tool(
   "history",
   "List recent request history",
-  { limit: z.object({ limit: z.number().int().positive().max(100).default(20) }) },
+  {
+    limit: z.object({
+      limit: z.number().int().positive().max(100).default(20),
+    }),
+  },
   async ({ limit: { limit } }) => {
     await ensureDataFiles();
-    const history: HistoryEntry[] = JSON.parse(await fs.readFile(HISTORY_FILE, "utf-8"));
-    return { content: [{ type: "text", text: JSON.stringify(history.slice(0, limit), null, 2) }] };
+    const history: HistoryEntry[] = JSON.parse(
+      await fs.readFile(HISTORY_FILE, "utf-8")
+    );
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(history.slice(0, limit), null, 2),
+        },
+      ],
+    };
   }
 );
 
@@ -721,7 +1032,9 @@ server.tool(
   { data: z.object({ collectionId: z.string() }) },
   async ({ data: { collectionId } }) => {
     await ensureDataFiles();
-    const collections: Collection[] = JSON.parse(await fs.readFile(COLLECTIONS_FILE, "utf-8"));
+    const collections: Collection[] = JSON.parse(
+      await fs.readFile(COLLECTIONS_FILE, "utf-8")
+    );
     const col = collections.find((c) => c.id === collectionId);
     if (!col) throw new Error("Collection not found");
 
@@ -729,23 +1042,59 @@ server.tool(
       name: r.name,
       request: {
         method: r.method,
-        header: Object.entries(r.headers).map(([key, value]) => ({ key, value })),
+        header: Object.entries(r.headers).map(([key, value]) => ({
+          key,
+          value,
+        })),
         url: r.url,
-        body: r.body ? { mode: "raw", raw: typeof r.body === "string" ? r.body : JSON.stringify(r.body, null, 2) } : undefined,
+        body: r.body
+          ? {
+              mode: "raw",
+              raw:
+                typeof r.body === "string"
+                  ? r.body
+                  : JSON.stringify(r.body, null, 2),
+            }
+          : undefined,
       },
-      _mcp: { id: r.id, variables: r.variables, auth: r.auth, preRequestScript: r.preRequestScript, testScript: r.testScript },
+      _mcp: {
+        id: r.id,
+        variables: r.variables,
+        auth: r.auth,
+        preRequestScript: r.preRequestScript,
+        testScript: r.testScript,
+      },
     });
 
-    const mapFolder = (f: Folder): any => ({ name: f.name, item: [...f.requests.map(mapRequest), ...f.folders.map(mapFolder)] });
+    const mapFolder = (f: Folder): any => ({
+      name: f.name,
+      item: [...f.requests.map(mapRequest), ...f.folders.map(mapFolder)],
+    });
 
     const exported = {
-      info: { name: col.name, schema: "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
-      item: [...col.requests.map(mapRequest), ...(col.folders || []).map(mapFolder)],
-      variable: col.variables ? Object.entries(col.variables).map(([key, value]) => ({ key, value })) : undefined,
-      _mcp: { id: col.id, auth: col.auth, preRequestScript: col.preRequestScript, testScript: col.testScript },
+      info: {
+        name: col.name,
+        schema:
+          "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+      },
+      item: [
+        ...col.requests.map(mapRequest),
+        ...(col.folders || []).map(mapFolder),
+      ],
+      variable: col.variables
+        ? Object.entries(col.variables).map(([key, value]) => ({ key, value }))
+        : undefined,
+      _mcp: {
+        id: col.id,
+        auth: col.auth,
+        preRequestScript: col.preRequestScript,
+        testScript: col.testScript,
+      },
     };
 
-    return { content: [{ type: "text", text: JSON.stringify(exported, null, 2) }] };
+    return {
+      content: [{ type: "text", text: JSON.stringify(exported, null, 2) }],
+    };
   }
 );
 
@@ -762,15 +1111,24 @@ server.tool(
     } catch {
       throw new Error("Invalid JSON");
     }
-    if (!parsed || !parsed.item || !Array.isArray(parsed.item)) throw new Error("Unsupported collection format");
-    const collections: Collection[] = JSON.parse(await fs.readFile(COLLECTIONS_FILE, "utf-8"));
+    if (!parsed || !parsed.item || !Array.isArray(parsed.item))
+      throw new Error("Unsupported collection format");
+    const collections: Collection[] = JSON.parse(
+      await fs.readFile(COLLECTIONS_FILE, "utf-8")
+    );
 
     const toRequest = (it: any): StoredRequest => ({
       id: genId(),
       name: it.name || "request",
       method: (it.request?.method || "GET").toUpperCase(),
-      url: typeof it.request?.url === "string" ? it.request.url : it.request?.url?.raw || "",
-      headers: (it.request?.header || []).reduce((acc: any, h: any) => { if (h && h.key) acc[h.key] = h.value || ""; return acc; }, {}),
+      url:
+        typeof it.request?.url === "string"
+          ? it.request.url
+          : it.request?.url?.raw || "",
+      headers: (it.request?.header || []).reduce((acc: any, h: any) => {
+        if (h && h.key) acc[h.key] = h.value || "";
+        return acc;
+      }, {}),
       body: it.request?.body?.raw ? it.request.body.raw : undefined,
       createdAt: new Date().toISOString(),
       variables: it._mcp?.variables,
@@ -783,7 +1141,9 @@ server.tool(
       id: genId(),
       name: item.name || "folder",
       requests: (item.item || []).filter((x: any) => x.request).map(toRequest),
-      folders: (item.item || []).filter((x: any) => x.item && !x.request).map(toFolder),
+      folders: (item.item || [])
+        .filter((x: any) => x.item && !x.request)
+        .map(toFolder),
       createdAt: new Date().toISOString(),
     });
 
@@ -791,23 +1151,36 @@ server.tool(
       id: genId(),
       name: parsed.info?.name || "Imported",
       requests: parsed.item.filter((x: any) => x.request).map(toRequest),
-      folders: parsed.item.filter((x: any) => x.item && !x.request).map(toFolder),
+      folders: parsed.item
+        .filter((x: any) => x.item && !x.request)
+        .map(toFolder),
       createdAt: new Date().toISOString(),
-      variables: (parsed.variable || []).reduce((acc: any, v: any) => { if (v.key) acc[v.key] = v.value || ""; return acc; }, {}),
+      variables: (parsed.variable || []).reduce((acc: any, v: any) => {
+        if (v.key) acc[v.key] = v.value || "";
+        return acc;
+      }, {}),
       auth: parsed._mcp?.auth,
       preRequestScript: parsed._mcp?.preRequestScript,
       testScript: parsed._mcp?.testScript,
     };
 
     collections.push(collection);
-    await fs.writeFile(COLLECTIONS_FILE, JSON.stringify(collections, null, 2), "utf-8");
-    return { content: [{ type: "text", text: JSON.stringify(collection, null, 2) }] };
+    await fs.writeFile(
+      COLLECTIONS_FILE,
+      JSON.stringify(collections, null, 2),
+      "utf-8"
+    );
+    return {
+      content: [{ type: "text", text: JSON.stringify(collection, null, 2) }],
+    };
   }
 );
 
-const jwtSecret:any = process.env.JWT_SECRET || "";
+const jwtSecret: any = process.env.JWT_SECRET || "";
 if (!jwtSecret) {
-  console.error("JWT_SECRET environment variable is not set, bearer token validation will not work");
+  console.error(
+    "JWT_SECRET environment variable is not set, bearer token validation will not work"
+  );
 }
 
 server.tool(
@@ -822,7 +1195,8 @@ server.tool(
     let decoded: any;
     try {
       decoded = jwt.decode(token, jwtSecret);
-      if (!decoded || !decoded.phone_number) throw new Error("phone_number not found in token");
+      if (!decoded || !decoded.phone_number)
+        throw new Error("phone_number not found in token");
     } catch (e: any) {
       throw new Error("Invalid token: " + (e?.message || e));
     }
@@ -837,7 +1211,6 @@ server.tool(
   }
 );
 
-
 // Start the MCP server
 async function main() {
   await ensureDataFiles();
@@ -849,7 +1222,9 @@ async function main() {
       console.error("[lifecycle] stdin ended (ignoring to keep server alive)");
     });
     process.stdin.on("close", () => {
-      console.error("[lifecycle] stdin closed (ignoring to keep server running)");
+      console.error(
+        "[lifecycle] stdin closed (ignoring to keep server running)"
+      );
     });
   }
 
@@ -862,12 +1237,12 @@ async function main() {
     console.error(`Invalid port value "${rawPort}", defaulting to 3000`);
   }
 
-  const healthServer = http.createServer((_req, res) => {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", time: new Date().toISOString() }));
+  app.get('/health', (_req, res) => {
+    res.json({ status: "ok", time: new Date().toISOString() });
   });
 
-  healthServer.listen(port, () => console.error(`Health endpoint on :${port}`));
+  const serverHttp = http.createServer(app);
+  serverHttp.listen(port, () => console.error(`HTTP server (health+SSE) on :${port}`));
 
   // Global error handlers
   process.on("uncaughtException", (err) => {
@@ -879,8 +1254,10 @@ async function main() {
 
   // Graceful shutdown
   const shutdown = (signal: string) => {
-    console.error(`[lifecycle] Received ${signal}, shutting down gracefully...`);
-    healthServer.close(() => {
+    console.error(
+      `[lifecycle] Received ${signal}, shutting down gracefully...`
+    );
+    serverHttp.close(() => {
       console.error("[lifecycle] HTTP server closed");
       // Delay a bit to flush logs
       setTimeout(() => process.exit(0), 200);
@@ -891,7 +1268,7 @@ async function main() {
       process.exit(1);
     }, 5000).unref();
   };
-  ["SIGTERM", "SIGINT"].forEach(sig => process.on(sig, () => shutdown(sig)));
+  ["SIGTERM", "SIGINT"].forEach((sig) => process.on(sig, () => shutdown(sig)));
 
   // Keep-alive heartbeat (covers edge case where event loop empties)
   const heartbeat = setInterval(() => {
@@ -900,29 +1277,28 @@ async function main() {
   heartbeat.unref();
 }
 
-app.get('/sse', (req, res) => {
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
+app.get("/sse", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
   // Optional: disable proxy buffering
   res.flushHeaders?.();
 
   const heartbeat = setInterval(() => {
-      res.write(':\n\n'); // comment heartbeat
+    res.write(":\n\n"); // comment heartbeat
   }, 15000);
 
   // Example initial event (adjust to MCP protocol your client expects)
   res.write(`event: ready\ndata: {"status":"ok"}\n\n`);
 
-  req.on('close', () => {
-      clearInterval(heartbeat);
+  req.on("close", () => {
+    clearInterval(heartbeat);
   });
 });
 
-app.get('/', (_, res) => res.send('MCP SSE server running'));
+app.get("/", (_, res) => res.send("MCP SSE server running"));
 
-
-main().catch(err => {
+main().catch((err) => {
   console.error("Fatal startup error:", err);
   process.exit(1);
 });
