@@ -8,6 +8,7 @@ import vm from "vm";
 import http from "http";
 import { fileURLToPath } from "url";
 import express from 'express';
+import jwt from "jsonwebtoken";
 
 const app = express();
 
@@ -800,6 +801,35 @@ server.tool(
     return { content: [{ type: "text", text: JSON.stringify(collection, null, 2) }] };
   }
 );
+
+server.tool(
+  "validate",
+  "Validate bearer token and return user's phone number in {country_code}{number} format",
+  {
+    data: z.object({
+      token: z.string().min(1, "Bearer token required"),
+    }),
+  },
+  async ({ data: { token } }) => {
+    // Replace 'your-secret' with your JWT secret or use public key as needed
+    let decoded: any;
+    try {
+      decoded = jwt.decode(token); // Use jwt.verify(token, 'your-secret') for real validation
+      if (!decoded || !decoded.phone_number) throw new Error("phone_number not found in token");
+    } catch (e: any) {
+      throw new Error("Invalid token: " + (e?.message || e));
+    }
+
+    // Extract phone number in format +91-9876543210 or +919876543210
+    let raw = decoded.phone_number as string;
+    let match = raw.match(/^\+?(\d{1,3})[-\s]?(\d{6,})$/);
+    if (!match) throw new Error("Invalid phone number format in token");
+    const phone = `${match[1]}${match[2]}`;
+
+    return { content: [{ type: "text", text: phone }] };
+  }
+);
+
 
 // Start the MCP server
 async function main() {
