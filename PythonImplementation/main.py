@@ -411,6 +411,168 @@ GetGlobalsDescription = RichToolDescription(
     use_when="You need to retrieve all globally stored variables",
 )
 
+@mcp.tool(description=ExecuteRequestDescription.model_dump_json())
+async def execute_request(
+    puch_user_id: Annotated[str, Field(description="User id performing action")],
+    collection_ref: Annotated[str, Field(description="Collection id or exact name containing the request")],
+    request_ref: Annotated[str, Field(description="Request id or exact name (if unique)")],
+    environment_ref: Annotated[Optional[str], Field(description="Environment id or name to apply (optional)")] = None,
+    timeout_seconds: Annotated[int, Field(description="Request timeout in seconds", ge=1, le=120)] = 30,
+) -> str:
+    await require_permission(puch_user_id, A_EXECUTE)
+    await ensure_user_data(puch_user_id)
+
+    # Load user data
+    collections = await read_user_json(puch_user_id, 'collections')
+    globals_obj = await read_user_json(puch_user_id, 'globals')
+    environments = await read_user_json(puch_user_id, 'environments')
+    env_vars: Dict[str, str] = {}
+
+    # Resolve environment (optional)
+    if environment_ref:
+        env = next((e for e in environments if e.get('id') == environment_ref or e.get('name') == environment_ref), None)
+        if not env:
+            raise McpError(ErrorData(code=INVALID_PARAMS, message="Environment not found"))
+        env_vars = env.get('variables', {})
+
+    # Resolve collection & request
+    col = await _resolve_collection(collections, collection_ref)
+    col_obj = Collection(**col)
+
+    all_requests: List[StoredRequest] = []
+    all_requests.extend(col_obj.requests)
+    stack = col_obj.folders.copy()
+    while stack:
+        f = stack.pop()
+        all_requests.extend(f.requests)
+        stack.extend(f.folders)
+
+    req = next((r for r in all_requests if r.id == request_ref), None)
+    if not req:
+        named = [r for r in all_requests if r.name == request_ref]
+        if len(named) == 1:
+            req = named[0]
+        elif len(named) > 1:
+            raise McpError(ErrorData(code=INVALID_PARAMS, message="Request name ambiguous; use id"))
+    if not req:
+        raise McpError(ErrorData(code=INVALID_PARAMS, message="Request not found"))
+
+    # Variable resolution order (lowest precedence first)
+    scopes: List[Dict[str, str]] = [
+        globals_obj.get('variables') or {},
+        env_vars,
+        col_obj.variables or {},
+        req.variables or {},
+    ]
+
+    # Build final URL / body / headers
+    final_url = resolve_variables(req.url, scopes)
+    final_headers = {k: resolve_variables(v, scopes) for k, v in (req.headers or {}).items()}
+    final_headers = apply_auth(final_headers, req.auth or col_obj.auth)
+
+    final_body = None
+    if isinstance(req.body, dict) or isinstance(req.body, list):
+        final_body = deep_apply(req.body, scopes)
+    elif isinstance(req.body, str):
+        final_body = resolve_variables(req.body, scopes)
+
+    context: Dict[str, Any] = {
+        "collection": json.loads(col_obj.model_dump_json()),
+        "request": json.loads(req.model_dump_json()),
+        "resolved": {
+            "url": final_url,
+            "headers": final_headers,
+            "body": final_body,
+        },
+        "variables": {
+            "globals": globals_obj.get('variables') or {},
+            "environment": env_vars,
+            "collection": col_obj.variables or {},
+            "request": req.variables or {},
+        },
+        "tests": [],
+        "console": [],
+    }
+
+    # Run pre-request script (stubbed)
+    if req.preRequestScript:
+        await run_script("pre-request", req.preRequestScript, context)
+    elif col_obj.preRequestScript:
+        await run_script("pre-request (collection)", col_obj.preRequestScript, context)
+
+    started = time.time()
+    status_code = None
+    resp_headers: Dict[str, str] = {}
+    resp_body_snippet: Union[str, Dict[str, Any], None] = None
+    error: Optional[str] = None
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+            method = req.method.upper()
+            if method in {"GET", "DELETE", "HEAD"}:
+                response = await client.request(method, final_url, headers=final_headers)
+            else:
+                # JSON vs raw
+                if isinstance(final_body, (dict, list)):
+                    response = await client.request(method, final_url, headers=final_headers, json=final_body)
+                else:
+                    response = await client.request(method, final_url, headers=final_headers, content=final_body if final_body else None)
+        status_code = response.status_code
+        resp_headers = {k: v for k, v in response.headers.items()}
+        content_type = response.headers.get("content-type", "")
+        try:
+            if "application/json" in content_type:
+                resp_body_snippet = response.json()
+            else:
+                text = response.text
+                resp_body_snippet = text[:5000]  # limit
+        except Exception:
+            resp_body_snippet = response.text[:5000]
+    except Exception as e:
+        error = str(e)
+
+    duration_ms = int((time.time() - started) * 1000)
+
+    # Run test script (stub) if success
+    if error is None:
+        if req.testScript:
+            await run_script("test", req.testScript, context)
+        elif col_obj.testScript:
+            await run_script("test (collection)", col_obj.testScript, context)
+
+    history_entry = {
+        "id": gen_id(),
+        "request": {
+            "id": req.id,
+            "name": req.name,
+            "method": req.method,
+            "resolvedUrl": final_url,
+            "headers": final_headers,
+            "body": final_body,
+        },
+        "response": {
+            "status": status_code,
+            "headers": resp_headers,
+            "body": resp_body_snippet,
+            "error": error,
+        },
+        "startedAt": datetime.utcnow().isoformat() + "Z",
+        "durationMs": duration_ms,
+        "tests": context.get("tests"),
+        "console": context.get("console"),
+        "environment": environment_ref,
+    }
+
+    # Persist history (prepend)
+    hist = await read_user_json(puch_user_id, 'history')
+    if not isinstance(hist, list):
+        hist = []
+    hist.insert(0, history_entry)
+    await write_user_json(puch_user_id, 'history', hist)
+
+    return json.dumps(history_entry, indent=2)
+
+
 @mcp.tool(description=GetGlobalsDescription.model_dump_json())
 async def get_globals() -> str:
     await ensure_data_files()
