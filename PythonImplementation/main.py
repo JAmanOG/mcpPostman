@@ -411,166 +411,117 @@ GetGlobalsDescription = RichToolDescription(
     use_when="You need to retrieve all globally stored variables",
 )
 
-@mcp.tool(description=ExecuteRequestDescription.model_dump_json())
-async def execute_request(
+SendRequestDescription = RichToolDescription(
+    description="Send an HTTP request (direct or stored)",
+    use_when="You want to execute an API request",
+    side_effects="Makes actual HTTP requests to external services",
+)
+
+# --- Tool: send_request ---
+@mcp.tool(description=SendRequestDescription.model_dump_json())
+async def send_request(
     puch_user_id: Annotated[str, Field(description="User id performing action")],
-    collection_ref: Annotated[str, Field(description="Collection id or exact name containing the request")],
-    request_ref: Annotated[str, Field(description="Request id or exact name (if unique)")],
-    environment_ref: Annotated[Optional[str], Field(description="Environment id or name to apply (optional)")] = None,
-    timeout_seconds: Annotated[int, Field(description="Request timeout in seconds", ge=1, le=120)] = 30,
+    method: Annotated[Optional[str], Field(description="HTTP method for direct request")] = None,
+    url: Annotated[Optional[str], Field(description="URL for direct request")] = None,
+    headers: Annotated[Optional[Dict[str, str]], Field(description="Headers for direct request")] = None,
+    body: Annotated[Optional[Any], Field(description="Body for direct request")] = None,
+    stored_request_id: Annotated[Optional[str], Field(description="ID of stored request to send")] = None,
+    collection_id: Annotated[Optional[str], Field(description="ID of collection containing stored request")] = None,
+    environment_id: Annotated[Optional[str], Field(description="ID of environment to use")] = None,
+    local_variables: Annotated[Optional[Dict[str, str]], Field(description="Local variables for this request")] = None,
+    auth: Annotated[Optional[AuthConfig], Field(description="Auth override for this request")] = None,
+    timeout_ms: Annotated[int, Field(description="Request timeout in milliseconds")] = 30000,
+    max_attempts: Annotated[int, Field(description="Total attempts including first (>=1, default 2)")] = 2,
+    retry_backoff_ms: Annotated[int, Field(description="Backoff between attempts in ms")] = 300,
 ) -> str:
     await require_permission(puch_user_id, A_EXECUTE)
+    if not ((stored_request_id and collection_id) or (method and url)):
+        raise McpError(ErrorData(code=INVALID_PARAMS, message="Either provide stored_request_id + collection_id OR method + url"))
+    if max_attempts < 1:
+        max_attempts = 1
     await ensure_user_data(puch_user_id)
-
-    # Load user data
-    collections = await read_user_json(puch_user_id, 'collections')
-    globals_obj = await read_user_json(puch_user_id, 'globals')
-    environments = await read_user_json(puch_user_id, 'environments')
-    env_vars: Dict[str, str] = {}
-
-    # Resolve environment (optional)
-    if environment_ref:
-        env = next((e for e in environments if e.get('id') == environment_ref or e.get('name') == environment_ref), None)
+    globals = await read_user_json(puch_user_id, 'globals')
+    col_obj = None
+    if stored_request_id:
+        collections = await read_user_json(puch_user_id, 'collections')
+        col = next((c for c in collections if c['id'] == collection_id), None)
+        if not col:
+            raise McpError(ErrorData(code=INVALID_PARAMS, message="Collection not found"))
+        col_obj = Collection(**col)
+        search_reqs = col_obj.requests.copy()
+        stack = col_obj.folders.copy()
+        while stack:
+            f = stack.pop()
+            search_reqs.extend(f.requests)
+            stack.extend(f.folders)
+        stored = next((r for r in search_reqs if r.id == stored_request_id), None)
+        if not stored:
+            raise McpError(ErrorData(code=INVALID_PARAMS, message="Stored request not found"))
+        request = stored.model_dump()
+    else:
+        request = {"id": gen_id(), "name": "ad-hoc", "method": method.upper(), "url": url, "headers": headers or {}, "body": body, "createdAt": datetime.now().isoformat(), "variables": {}}
+    env_vars = {}
+    if environment_id:
+        envs = await read_user_json(puch_user_id, 'environments')
+        env = next((e for e in envs if e['id'] == environment_id), None)
         if not env:
             raise McpError(ErrorData(code=INVALID_PARAMS, message="Environment not found"))
-        env_vars = env.get('variables', {})
+        env_vars = env['variables']
+    local_vars = local_variables or {}
+    request_vars = request.get('variables') or {}
+    collection_vars = col_obj.variables if col_obj else {}
+    global_vars = globals.get('variables') or {}
+    chain = [local_vars, request_vars, collection_vars, env_vars, global_vars]
+    tests = []
+    console_logs = []
+    req_resolved = {**request, 'url': resolve_variables(request['url'], chain), 'headers': deep_apply(request['headers'], chain), 'body': deep_apply(request.get('body'), chain)}
+    effective_auth = auth or (AuthConfig(**request['auth']) if request.get('auth') else None)
+    headers_with_auth = apply_auth(req_resolved['headers'], effective_auth)
 
-    # Resolve collection & request
-    col = await _resolve_collection(collections, collection_ref)
-    col_obj = Collection(**col)
-
-    all_requests: List[StoredRequest] = []
-    all_requests.extend(col_obj.requests)
-    stack = col_obj.folders.copy()
-    while stack:
-        f = stack.pop()
-        all_requests.extend(f.requests)
-        stack.extend(f.folders)
-
-    req = next((r for r in all_requests if r.id == request_ref), None)
-    if not req:
-        named = [r for r in all_requests if r.name == request_ref]
-        if len(named) == 1:
-            req = named[0]
-        elif len(named) > 1:
-            raise McpError(ErrorData(code=INVALID_PARAMS, message="Request name ambiguous; use id"))
-    if not req:
-        raise McpError(ErrorData(code=INVALID_PARAMS, message="Request not found"))
-
-    # Variable resolution order (lowest precedence first)
-    scopes: List[Dict[str, str]] = [
-        globals_obj.get('variables') or {},
-        env_vars,
-        col_obj.variables or {},
-        req.variables or {},
-    ]
-
-    # Build final URL / body / headers
-    final_url = resolve_variables(req.url, scopes)
-    final_headers = {k: resolve_variables(v, scopes) for k, v in (req.headers or {}).items()}
-    final_headers = apply_auth(final_headers, req.auth or col_obj.auth)
-
-    final_body = None
-    if isinstance(req.body, dict) or isinstance(req.body, list):
-        final_body = deep_apply(req.body, scopes)
-    elif isinstance(req.body, str):
-        final_body = resolve_variables(req.body, scopes)
-
-    context: Dict[str, Any] = {
-        "collection": json.loads(col_obj.model_dump_json()),
-        "request": json.loads(req.model_dump_json()),
-        "resolved": {
-            "url": final_url,
-            "headers": final_headers,
-            "body": final_body,
-        },
-        "variables": {
-            "globals": globals_obj.get('variables') or {},
-            "environment": env_vars,
-            "collection": col_obj.variables or {},
-            "request": req.variables or {},
-        },
-        "tests": [],
-        "console": [],
-    }
-
-    # Run pre-request script (stubbed)
-    if req.preRequestScript:
-        await run_script("pre-request", req.preRequestScript, context)
-    elif col_obj.preRequestScript:
-        await run_script("pre-request (collection)", col_obj.preRequestScript, context)
-
-    started = time.time()
-    status_code = None
-    resp_headers: Dict[str, str] = {}
-    resp_body_snippet: Union[str, Dict[str, Any], None] = None
-    error: Optional[str] = None
-
-    try:
-        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-            method = req.method.upper()
-            if method in {"GET", "DELETE", "HEAD"}:
-                response = await client.request(method, final_url, headers=final_headers)
-            else:
-                # JSON vs raw
-                if isinstance(final_body, (dict, list)):
-                    response = await client.request(method, final_url, headers=final_headers, json=final_body)
-                else:
-                    response = await client.request(method, final_url, headers=final_headers, content=final_body if final_body else None)
-        status_code = response.status_code
-        resp_headers = {k: v for k, v in response.headers.items()}
-        content_type = response.headers.get("content-type", "")
+    last_error: Optional[str] = None
+    response_obj: Dict[str, Any] = {"status": 0, "statusText": "UNSENT", "headers": {}, "body": None}
+    attempt = 0
+    started_total = time.time()
+    while attempt < max_attempts:
+        attempt += 1
         try:
-            if "application/json" in content_type:
-                resp_body_snippet = response.json()
-            else:
-                text = response.text
-                resp_body_snippet = text[:5000]  # limit
-        except Exception:
-            resp_body_snippet = response.text[:5000]
-    except Exception as e:
-        error = str(e)
+            async with httpx.AsyncClient() as client:
+                req_kwargs = {"method": req_resolved['method'], "headers": headers_with_auth, "timeout": timeout_ms/1000}
+                if req_resolved.get('body') is not None and req_resolved['method'] != 'GET':
+                    if isinstance(req_resolved['body'], dict):
+                        req_kwargs['headers']['Content-Type'] = 'application/json'
+                        req_kwargs['json'] = req_resolved['body']
+                    else:
+                        req_kwargs['content'] = str(req_resolved['body'])
+                r = await client.request(url=req_resolved['url'], **req_kwargs)
+                try:
+                    parsed = r.json()
+                except ValueError:
+                    parsed = r.text
+                response_obj = {"status": r.status_code, "statusText": r.reason_phrase, "headers": dict(r.headers), "body": parsed}
+                # Retry on 5xx if attempts remain
+                if 500 <= r.status_code < 600 and attempt < max_attempts:
+                    last_error = f"Server error {r.status_code}, retrying {attempt}/{max_attempts}"
+                else:
+                    last_error = None
+                    break
+        except Exception as e:
+            last_error = str(e)
+            if attempt >= max_attempts:
+                response_obj = {"status": 0, "statusText": "ERROR", "headers": {}, "body": last_error}
+                break
+        # backoff if another attempt pending
+        if attempt < max_attempts and retry_backoff_ms > 0:
+            await asyncio.sleep(retry_backoff_ms / 1000)
 
-    duration_ms = int((time.time() - started) * 1000)
+    elapsed = int((time.time() - started_total) * 1000)
+    history = await read_user_json(puch_user_id, 'history')
+    history.insert(0, {"id": gen_id(), "request": {"method": req_resolved['method'], "url": req_resolved['url'], "headers": headers_with_auth, "body": req_resolved.get('body')}, "response": response_obj, "startedAt": datetime.now().isoformat(), "durationMs": elapsed, "tests": tests, "console": console_logs, "attempts": attempt, "lastError": last_error})
+    while len(history) > 200:
+        history.pop()
+    await write_user_json(puch_user_id, 'history', history)
+    return json.dumps({"response": response_obj, "attempts": attempt, "lastError": last_error, "resolvedUrl": req_resolved['url']}, indent=2)
 
-    # Run test script (stub) if success
-    if error is None:
-        if req.testScript:
-            await run_script("test", req.testScript, context)
-        elif col_obj.testScript:
-            await run_script("test (collection)", col_obj.testScript, context)
-
-    history_entry = {
-        "id": gen_id(),
-        "request": {
-            "id": req.id,
-            "name": req.name,
-            "method": req.method,
-            "resolvedUrl": final_url,
-            "headers": final_headers,
-            "body": final_body,
-        },
-        "response": {
-            "status": status_code,
-            "headers": resp_headers,
-            "body": resp_body_snippet,
-            "error": error,
-        },
-        "startedAt": datetime.utcnow().isoformat() + "Z",
-        "durationMs": duration_ms,
-        "tests": context.get("tests"),
-        "console": context.get("console"),
-        "environment": environment_ref,
-    }
-
-    # Persist history (prepend)
-    hist = await read_user_json(puch_user_id, 'history')
-    if not isinstance(hist, list):
-        hist = []
-    hist.insert(0, history_entry)
-    await write_user_json(puch_user_id, 'history', hist)
-
-    return json.dumps(history_entry, indent=2)
 
 
 @mcp.tool(description=GetGlobalsDescription.model_dump_json())

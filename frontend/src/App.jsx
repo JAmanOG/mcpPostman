@@ -1,14 +1,14 @@
 import React from 'react'
 import './App.css'
 
-const MCPPostmanDocs = () => {
+const MCPReqForgeDocs = () => {
   return (
     <div className="docs-container">
       <header className="hero-section">
         <div className="hero-content">
-          <h1 className="hero-title">🚀 MCP Postman Server</h1>
+          <h1 className="hero-title">🚀 MCP ReqForge Server</h1>
           <p className="hero-subtitle">
-            A comprehensive Postman-like MCP (Model Context Protocol) server with user-based RBAC, 
+            A comprehensive ReqForge-like MCP (Model Context Protocol) server with user-based RBAC, 
             Redis backend, and full API testing capabilities.
           </p>
           <div className="server-info">
@@ -94,6 +94,10 @@ const MCPPostmanDocs = () => {
               </div>
               <div className="tools-list">
                 <div className="tool-item">
+                  <span className="tool-name">send_request</span>
+                  <span className="tool-desc">You can send an HTTP request either directly or from a stored source. To accomplish this, you want to execute an API request that makes actual HTTP requests to external services</span>
+                </div>
+                <div className="tool-item">
                   <span className="tool-name">add_request</span>
                   <span className="tool-desc">Create comprehensive API requests with headers, auth, and scripts</span>
                 </div>
@@ -157,11 +161,11 @@ const MCPPostmanDocs = () => {
                 </div>
                 <div className="tool-item">
                   <span className="tool-name">export_collection</span>
-                  <span className="tool-desc">Generate Postman-compatible JSON exports for sharing</span>
+                  <span className="tool-desc">Generate ReqForge-compatible JSON exports for sharing</span>
                 </div>
                 <div className="tool-item">
-                  <span className="tool-name">import_postman_collection</span>
-                  <span className="tool-desc">Import existing Postman collections with full fidelity</span>
+                  <span className="tool-name">import_ReqForge_collection</span>
+                  <span className="tool-desc">Import existing ReqForge collections with full fidelity</span>
                 </div>
                 <div className="tool-item">
                   <span className="tool-name">validate</span>
@@ -216,8 +220,8 @@ const MCPPostmanDocs = () => {
             </div>
             <div className="capability-card">
               <div className="capability-icon">🔄</div>
-              <h3>Postman Compatibility</h3>
-              <p>Full import/export support for Postman collections with script preservation</p>
+              <h3>ReqForge Compatibility</h3>
+              <p>Full import/export support for ReqForge collections with script preservation</p>
             </div>
             <div className="capability-card">
               <div className="capability-icon">🌍</div>
@@ -290,7 +294,7 @@ const MCPPostmanDocs = () => {
 }
 
 function App() {
-  return <MCPPostmanDocs />
+  return <MCPReqForgeDocs />
 }
 
 export default App
