@@ -1,1 +1,17 @@
-[]
+[
+  {
+    "id": "cbb526d5c3880663",
+    "name": "My API Collection",
+    "requests": [],
+    "folders": [
+      {
+        "id": "a0be486dbbe3c205",
+        "name": "hello",
+        "requests": [],
+        "folders": [],
+        "createdAt": "2025-08-10T01:00:08.235Z"
+      }
+    ],
+    "createdAt": "2025-08-10T01:00:04.744Z"
+  }
+]

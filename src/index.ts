@@ -5,15 +5,13 @@ import { promises as fs } from "fs";
 import path from "path";
 import crypto from "crypto";
 import vm from "vm";
-import http from "http";
+import http, { createServer } from "http";
 import { fileURLToPath } from "url";
-import express from "express";
 import jwt from "jsonwebtoken";
 import { config } from "dotenv";
 
 config();
 
-const app = express();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1232,18 +1230,16 @@ async function main() {
   console.error("MCP server started on stdin/stdout transport");
 
   const rawPort = process.env.PORT || process.env.WEBSITE_PORT || "3000";
-  const port = parseInt(rawPort, 10);
-  if (Number.isNaN(port)) {
+  if (Number.isNaN(rawPort)) {
     console.error(`Invalid port value "${rawPort}", defaulting to 3000`);
   }
-
-  app.get('/health', (_req, res) => {
-    res.json({ status: "ok", time: new Date().toISOString() });
+  const serverHttp = createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("MCP Postman server is running");
   });
-
-  const serverHttp = http.createServer(app);
-  serverHttp.listen(port, () => console.error(`HTTP server (health+SSE) on :${port}`));
-
+  serverHttp.listen(rawPort, () => {
+    console.error(`[lifecycle] HTTP server listening on port ${rawPort}`);
+  });
   // Global error handlers
   process.on("uncaughtException", (err) => {
     console.error("[fatal] uncaughtException", err);
@@ -1276,27 +1272,6 @@ async function main() {
   }, 60_000);
   heartbeat.unref();
 }
-
-app.get("/sse", (req, res) => {
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  // Optional: disable proxy buffering
-  res.flushHeaders?.();
-
-  const heartbeat = setInterval(() => {
-    res.write(":\n\n"); // comment heartbeat
-  }, 15000);
-
-  // Example initial event (adjust to MCP protocol your client expects)
-  res.write(`event: ready\ndata: {"status":"ok"}\n\n`);
-
-  req.on("close", () => {
-    clearInterval(heartbeat);
-  });
-});
-
-app.get("/", (_, res) => res.send("MCP SSE server running"));
 
 main().catch((err) => {
   console.error("Fatal startup error:", err);

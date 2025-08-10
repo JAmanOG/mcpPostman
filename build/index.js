@@ -5,8 +5,11 @@ import { promises as fs } from "fs";
 import path from "path";
 import crypto from "crypto";
 import vm from "vm";
-import http from "http";
+import { createServer } from "http";
 import { fileURLToPath } from "url";
+import jwt from "jsonwebtoken";
+import { config } from "dotenv";
+config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 // Simple persistence paths
@@ -69,7 +72,9 @@ function applyAuth(headers, auth) {
     if (!auth)
         return headers;
     const h = { ...headers };
-    if (auth.type === "basic" && auth.username !== undefined && auth.password !== undefined) {
+    if (auth.type === "basic" &&
+        auth.username !== undefined &&
+        auth.password !== undefined) {
         const token = Buffer.from(`${auth.username}:${auth.password}`).toString("base64");
         h["Authorization"] = `Basic ${token}`;
     }
@@ -89,19 +94,38 @@ function runScript(label, source, contextData) {
         test: (name, cond) => {
             try {
                 const passed = !!cond;
-                contextData.tests.push({ name, passed, ...(passed ? {} : { error: "Assertion failed" }) });
+                contextData.tests.push({
+                    name,
+                    passed,
+                    ...(passed ? {} : { error: "Assertion failed" }),
+                });
             }
             catch (e) {
-                contextData.tests.push({ name, passed: false, error: e?.message || "error" });
+                contextData.tests.push({
+                    name,
+                    passed: false,
+                    error: e?.message || "error",
+                });
             }
         },
-        console: { log: (...args) => contextData.console.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ")) },
+        console: {
+            log: (...args) => contextData.console.push(args
+                .map((a) => (typeof a === "string" ? a : JSON.stringify(a)))
+                .join(" ")),
+        },
     };
     try {
-        vm.runInNewContext(source, sandbox, { timeout: 100, microtaskMode: "afterEvaluate" });
+        vm.runInNewContext(source, sandbox, {
+            timeout: 100,
+            microtaskMode: "afterEvaluate",
+        });
     }
     catch (e) {
-        contextData.tests.push({ name: `${label} script error`, passed: false, error: e?.message || String(e) });
+        contextData.tests.push({
+            name: `${label} script error`,
+            passed: false,
+            error: e?.message || String(e),
+        });
     }
 }
 function findFolder(collection, folderId) {
@@ -128,19 +152,30 @@ server.tool("set_globals", "Set or merge global variables", { data: z.object({ v
     const globals = JSON.parse(await fs.readFile(GLOBALS_FILE, "utf-8"));
     globals.variables = { ...(globals.variables || {}), ...variables };
     await fs.writeFile(GLOBALS_FILE, JSON.stringify(globals, null, 2), "utf-8");
-    return { content: [{ type: "text", text: JSON.stringify(globals, null, 2) }] };
+    return {
+        content: [{ type: "text", text: JSON.stringify(globals, null, 2) }],
+    };
 });
 // Tool: get_globals
 server.tool("get_globals", "Get global variables", {}, async () => {
     await ensureDataFiles();
     const globals = JSON.parse(await fs.readFile(GLOBALS_FILE, "utf-8"));
-    return { content: [{ type: "text", text: JSON.stringify(globals, null, 2) }] };
+    return {
+        content: [{ type: "text", text: JSON.stringify(globals, null, 2) }],
+    };
 });
 server.tool("create_collection", "Create a new request collection", {
     name: z.object({
         name: z.string().min(1),
         variables: z.record(z.string()).optional(),
-        auth: z.object({ type: z.enum(["basic", "bearer"]), username: z.string().optional(), password: z.string().optional(), token: z.string().optional() }).optional(),
+        auth: z
+            .object({
+            type: z.enum(["basic", "bearer"]),
+            username: z.string().optional(),
+            password: z.string().optional(),
+            token: z.string().optional(),
+        })
+            .optional(),
         preRequestScript: z.string().optional(),
         testScript: z.string().optional(),
     }),
@@ -168,11 +203,19 @@ server.tool("update_collection", "Update collection name/variables/auth/scripts"
         collectionId: z.string(),
         name: z.string().optional(),
         variables: z.record(z.string()).optional(),
-        auth: z.object({ type: z.enum(["basic", "bearer"]), username: z.string().optional(), password: z.string().optional(), token: z.string().optional() }).optional().nullable(),
+        auth: z
+            .object({
+            type: z.enum(["basic", "bearer"]),
+            username: z.string().optional(),
+            password: z.string().optional(),
+            token: z.string().optional(),
+        })
+            .optional()
+            .nullable(),
         preRequestScript: z.string().optional().nullable(),
         testScript: z.string().optional().nullable(),
     }),
-}, async ({ data: { collectionId, name, variables, auth, preRequestScript, testScript } }) => {
+}, async ({ data: { collectionId, name, variables, auth, preRequestScript, testScript }, }) => {
     await ensureDataFiles();
     const collections = JSON.parse(await fs.readFile(COLLECTIONS_FILE, "utf-8"));
     const col = collections.find((c) => c.id === collectionId);
@@ -212,16 +255,30 @@ server.tool("delete_collection", "Delete a collection", { data: z.object({ colle
 server.tool("list_collections", "List all collections", {}, async () => {
     await ensureDataFiles();
     const collections = JSON.parse(await fs.readFile(COLLECTIONS_FILE, "utf-8"));
-    return { content: [{ type: "text", text: JSON.stringify(collections, null, 2) }] };
+    return {
+        content: [{ type: "text", text: JSON.stringify(collections, null, 2) }],
+    };
 });
 // Tool: add_folder
-server.tool("add_folder", "Add a folder to a collection (optionally nested)", { data: z.object({ collectionId: z.string(), parentFolderId: z.string().optional(), name: z.string() }) }, async ({ data: { collectionId, parentFolderId, name } }) => {
+server.tool("add_folder", "Add a folder to a collection (optionally nested)", {
+    data: z.object({
+        collectionId: z.string(),
+        parentFolderId: z.string().optional(),
+        name: z.string(),
+    }),
+}, async ({ data: { collectionId, parentFolderId, name } }) => {
     await ensureDataFiles();
     const collections = JSON.parse(await fs.readFile(COLLECTIONS_FILE, "utf-8"));
     const col = collections.find((c) => c.id === collectionId);
     if (!col)
         throw new Error("Collection not found");
-    const folder = { id: genId(), name, requests: [], folders: [], createdAt: new Date().toISOString() };
+    const folder = {
+        id: genId(),
+        name,
+        requests: [],
+        folders: [],
+        createdAt: new Date().toISOString(),
+    };
     if (parentFolderId) {
         const parent = findFolder(col, parentFolderId);
         if (!parent)
@@ -233,7 +290,9 @@ server.tool("add_folder", "Add a folder to a collection (optionally nested)", { 
         col.folders.push(folder);
     }
     await fs.writeFile(COLLECTIONS_FILE, JSON.stringify(collections, null, 2), "utf-8");
-    return { content: [{ type: "text", text: JSON.stringify(folder, null, 2) }] };
+    return {
+        content: [{ type: "text", text: JSON.stringify(folder, null, 2) }],
+    };
 });
 // Tool: add_request (extended with folder, vars, auth, scripts)
 server.tool("add_request", "Add a request definition to a collection or folder", {
@@ -241,16 +300,23 @@ server.tool("add_request", "Add a request definition to a collection or folder",
         collectionId: z.string(),
         folderId: z.string().optional(),
         name: z.string(),
-        method: z.string().toUpperCase(),
+        method: z.string().transform((s) => s.toUpperCase()),
         url: z.string(),
         headers: z.record(z.string()).default({}),
         body: z.any().optional(),
         variables: z.record(z.string()).optional(),
-        auth: z.object({ type: z.enum(["basic", "bearer"]), username: z.string().optional(), password: z.string().optional(), token: z.string().optional() }).optional(),
+        auth: z
+            .object({
+            type: z.enum(["basic", "bearer"]),
+            username: z.string().optional(),
+            password: z.string().optional(),
+            token: z.string().optional(),
+        })
+            .optional(),
         preRequestScript: z.string().optional(),
         testScript: z.string().optional(),
     }),
-}, async ({ data: { collectionId, folderId, name, method, url, headers, body, variables, auth, preRequestScript, testScript } }) => {
+}, async ({ data: { collectionId, folderId, name, method, url, headers, body, variables, auth, preRequestScript, testScript, }, }) => {
     await ensureDataFiles();
     const collections = JSON.parse(await fs.readFile(COLLECTIONS_FILE, "utf-8"));
     const col = collections.find((c) => c.id === collectionId);
@@ -287,12 +353,23 @@ server.tool("update_request", "Update a stored request (searches all folders)", 
         collectionId: z.string(),
         requestId: z.string(),
         name: z.string().optional(),
-        method: z.string().optional(),
+        method: z
+            .string()
+            .transform((s) => s.toUpperCase())
+            .optional(),
         url: z.string().optional(),
         headers: z.record(z.string()).optional(),
         body: z.any().optional(),
         variables: z.record(z.string()).optional(),
-        auth: z.object({ type: z.enum(["basic", "bearer"]), username: z.string().optional(), password: z.string().optional(), token: z.string().optional() }).optional().nullable(),
+        auth: z
+            .object({
+            type: z.enum(["basic", "bearer"]),
+            username: z.string().optional(),
+            password: z.string().optional(),
+            token: z.string().optional(),
+        })
+            .optional()
+            .nullable(),
         preRequestScript: z.string().optional().nullable(),
         testScript: z.string().optional().nullable(),
     }),
@@ -342,7 +419,9 @@ server.tool("update_request", "Update a stored request (searches all folders)", 
     else if (data.testScript !== undefined)
         target.testScript = data.testScript;
     await fs.writeFile(COLLECTIONS_FILE, JSON.stringify(collections, null, 2), "utf-8");
-    return { content: [{ type: "text", text: JSON.stringify(target, null, 2) }] };
+    return {
+        content: [{ type: "text", text: JSON.stringify(target, null, 2) }],
+    };
 });
 // Tool: delete_request
 server.tool("delete_request", "Delete a stored request", { data: z.object({ collectionId: z.string(), requestId: z.string() }) }, async ({ data: { collectionId, requestId } }) => {
@@ -372,7 +451,12 @@ server.tool("delete_request", "Delete a stored request", { data: z.object({ coll
     return { content: [{ type: "text", text: "Deleted" }] };
 });
 // Tool: list_requests (extended optional folderId)
-server.tool("list_requests", "List stored requests in a collection or folder", { data: z.object({ collectionId: z.string(), folderId: z.string().optional() }) }, async ({ data: { collectionId, folderId } }) => {
+server.tool("list_requests", "List stored requests in a collection or folder", {
+    data: z.object({
+        collectionId: z.string(),
+        folderId: z.string().optional(),
+    }),
+}, async ({ data: { collectionId, folderId } }) => {
     await ensureDataFiles();
     const collections = JSON.parse(await fs.readFile(COLLECTIONS_FILE, "utf-8"));
     const col = collections.find((c) => c.id === collectionId);
@@ -382,21 +466,37 @@ server.tool("list_requests", "List stored requests in a collection or folder", {
         const folder = findFolder(col, folderId);
         if (!folder)
             throw new Error("Folder not found");
-        return { content: [{ type: "text", text: JSON.stringify(folder.requests, null, 2) }] };
+        return {
+            content: [
+                { type: "text", text: JSON.stringify(folder.requests, null, 2) },
+            ],
+        };
     }
-    return { content: [{ type: "text", text: JSON.stringify(col.requests, null, 2) }] };
+    return {
+        content: [{ type: "text", text: JSON.stringify(col.requests, null, 2) }],
+    };
 });
 // Tool: create_environment
 server.tool("create_environment", "Create an environment variable set", { data: z.object({ name: z.string(), variables: z.record(z.string()) }) }, async ({ data: { name, variables } }) => {
     await ensureDataFiles();
     const envs = JSON.parse(await fs.readFile(ENV_FILE, "utf-8"));
-    const env = { id: genId(), name, variables, createdAt: new Date().toISOString() };
+    const env = {
+        id: genId(),
+        name,
+        variables,
+        createdAt: new Date().toISOString(),
+    };
     envs.push(env);
     await fs.writeFile(ENV_FILE, JSON.stringify(envs, null, 2), "utf-8");
     return { content: [{ type: "text", text: JSON.stringify(env, null, 2) }] };
 });
 // Tool: update_environment
-server.tool("update_environment", "Update environment variables (merge)", { data: z.object({ environmentId: z.string(), variables: z.record(z.string()) }) }, async ({ data: { environmentId, variables } }) => {
+server.tool("update_environment", "Update environment variables (merge)", {
+    data: z.object({
+        environmentId: z.string(),
+        variables: z.record(z.string()),
+    }),
+}, async ({ data: { environmentId, variables } }) => {
     await ensureDataFiles();
     const envs = JSON.parse(await fs.readFile(ENV_FILE, "utf-8"));
     const env = envs.find((e) => e.id === environmentId);
@@ -425,7 +525,8 @@ server.tool("list_environments", "List environments", {}, async () => {
 });
 // Tool: send_request (extended for variables, auth, scripts, folder search)
 server.tool("send_request", "Send an HTTP request (direct or stored). Applies variable scopes, auth, scripts.", {
-    data: z.object({
+    data: z
+        .object({
         method: z.string().optional(),
         url: z.string().optional(),
         headers: z.record(z.string()).optional(),
@@ -434,10 +535,21 @@ server.tool("send_request", "Send an HTTP request (direct or stored). Applies va
         collectionId: z.string().optional(),
         environmentId: z.string().optional(),
         localVariables: z.record(z.string()).optional(),
-        auth: z.object({ type: z.enum(["basic", "bearer"]), username: z.string().optional(), password: z.string().optional(), token: z.string().optional() }).optional(),
+        auth: z
+            .object({
+            type: z.enum(["basic", "bearer"]),
+            username: z.string().optional(),
+            password: z.string().optional(),
+            token: z.string().optional(),
+        })
+            .optional(),
         timeoutMs: z.number().int().positive().max(120000).default(30000),
-    }).refine((data) => (data.storedRequestId && data.collectionId) || (data.method && data.url), { message: "Either provide storedRequestId + collectionId OR method + url" }),
-}, async ({ data: { method, url, headers, body, storedRequestId, collectionId, environmentId, localVariables, auth, timeoutMs } }) => {
+    })
+        .refine((data) => (data.storedRequestId && data.collectionId) ||
+        (data.method && data.url), {
+        message: "Either provide storedRequestId + collectionId OR method + url",
+    }),
+}, async ({ data: { method, url, headers, body, storedRequestId, collectionId, environmentId, localVariables, auth, timeoutMs, }, }) => {
     await ensureDataFiles();
     const globals = JSON.parse(await fs.readFile(GLOBALS_FILE, "utf-8"));
     let request;
@@ -489,16 +601,38 @@ server.tool("send_request", "Send an HTTP request (direct or stored). Applies va
     const requestVars = request.variables || {};
     const collectionVars = collection?.variables || {};
     const globalVars = globals.variables || {};
-    const variableChain = [localVars, requestVars, collectionVars, envVars, globalVars];
+    const variableChain = [
+        localVars,
+        requestVars,
+        collectionVars,
+        envVars,
+        globalVars,
+    ];
     // Pre-request scripts (collection then request)
     const tests = [];
     const consoleLogs = [];
     if (collection?.preRequestScript)
-        runScript("collection pre-request", collection.preRequestScript, { request, variables: localVars, tests, console: consoleLogs });
+        runScript("collection pre-request", collection.preRequestScript, {
+            request,
+            variables: localVars,
+            tests,
+            console: consoleLogs,
+        });
     if (request.preRequestScript)
-        runScript("request pre-request", request.preRequestScript, { request, variables: localVars, tests, console: consoleLogs });
+        runScript("request pre-request", request.preRequestScript, {
+            request,
+            variables: localVars,
+            tests,
+            console: consoleLogs,
+        });
     // After pre-request scripts, variable chain may have new local vars
-    const finalVariableChain = [localVars, requestVars, collectionVars, envVars, globalVars];
+    const finalVariableChain = [
+        localVars,
+        requestVars,
+        collectionVars,
+        envVars,
+        globalVars,
+    ];
     // Apply variable substitution to request clone
     const reqResolved = {
         ...request,
@@ -514,14 +648,27 @@ server.tool("send_request", "Send an HTTP request (direct or stored). Applies va
     const started = performance.now();
     let responseObj;
     try {
-        const fetchOpts = { method: reqResolved.method, headers: headersWithAuth, signal: controller.signal };
-        if (reqResolved.body !== undefined && reqResolved.body !== null && reqResolved.method !== "GET") {
-            if (typeof reqResolved.body === "object" && !Array.isArray(reqResolved.body)) {
-                fetchOpts.headers = { "Content-Type": "application/json", ...fetchOpts.headers };
+        const fetchOpts = {
+            method: reqResolved.method,
+            headers: headersWithAuth,
+            signal: controller.signal,
+        };
+        if (reqResolved.body !== undefined &&
+            reqResolved.body !== null &&
+            reqResolved.method !== "GET") {
+            if (typeof reqResolved.body === "object" &&
+                !Array.isArray(reqResolved.body)) {
+                fetchOpts.headers = {
+                    "Content-Type": "application/json",
+                    ...fetchOpts.headers,
+                };
                 fetchOpts.body = JSON.stringify(reqResolved.body);
             }
             else {
-                fetchOpts.body = typeof reqResolved.body === 'string' ? reqResolved.body : JSON.stringify(reqResolved.body);
+                fetchOpts.body =
+                    typeof reqResolved.body === "string"
+                        ? reqResolved.body
+                        : JSON.stringify(reqResolved.body);
             }
         }
         const res = await fetch(reqResolved.url, fetchOpts);
@@ -534,31 +681,89 @@ server.tool("send_request", "Send an HTTP request (direct or stored). Applies va
             parsed = resText;
         }
         const resHeaders = {};
-        res.headers.forEach((v, k) => resHeaders[k] = v);
-        responseObj = { status: res.status, statusText: res.statusText, headers: resHeaders, body: parsed };
+        res.headers.forEach((v, k) => (resHeaders[k] = v));
+        responseObj = {
+            status: res.status,
+            statusText: res.statusText,
+            headers: resHeaders,
+            body: parsed,
+        };
     }
     finally {
         clearTimeout(timer);
     }
     // Test scripts
     if (collection?.testScript)
-        runScript("collection test", collection.testScript, { request: reqResolved, response: responseObj, variables: localVars, tests, console: consoleLogs });
+        runScript("collection test", collection.testScript, {
+            request: reqResolved,
+            response: responseObj,
+            variables: localVars,
+            tests,
+            console: consoleLogs,
+        });
     if (request.testScript)
-        runScript("request test", request.testScript, { request: reqResolved, response: responseObj, variables: localVars, tests, console: consoleLogs });
+        runScript("request test", request.testScript, {
+            request: reqResolved,
+            response: responseObj,
+            variables: localVars,
+            tests,
+            console: consoleLogs,
+        });
     // Persist history
     const elapsed = performance.now();
     const history = JSON.parse(await fs.readFile(HISTORY_FILE, "utf-8"));
-    history.unshift({ id: genId(), request: { method: reqResolved.method, url: reqResolved.url, headers: headersWithAuth, body: reqResolved.body }, response: responseObj || { status: 0, statusText: "ABORTED", headers: {}, body: null }, startedAt: new Date().toISOString(), durationMs: Math.round(elapsed), tests, console: consoleLogs });
+    history.unshift({
+        id: genId(),
+        request: {
+            method: reqResolved.method,
+            url: reqResolved.url,
+            headers: headersWithAuth,
+            body: reqResolved.body,
+        },
+        response: responseObj || {
+            status: 0,
+            statusText: "ABORTED",
+            headers: {},
+            body: null,
+        },
+        startedAt: new Date().toISOString(),
+        durationMs: Math.round(elapsed),
+        tests,
+        console: consoleLogs,
+    });
     while (history.length > 200)
         history.pop();
     await fs.writeFile(HISTORY_FILE, JSON.stringify(history, null, 2), "utf-8");
-    return { content: [{ type: "text", text: JSON.stringify({ response: responseObj, tests, console: consoleLogs, resolvedUrl: reqResolved.url }, null, 2) }] };
+    return {
+        content: [
+            {
+                type: "text",
+                text: JSON.stringify({
+                    response: responseObj,
+                    tests,
+                    console: consoleLogs,
+                    resolvedUrl: reqResolved.url,
+                }, null, 2),
+            },
+        ],
+    };
 });
 // Tool: history (extended)
-server.tool("history", "List recent request history", { limit: z.object({ limit: z.number().int().positive().max(100).default(20) }) }, async ({ limit: { limit } }) => {
+server.tool("history", "List recent request history", {
+    limit: z.object({
+        limit: z.number().int().positive().max(100).default(20),
+    }),
+}, async ({ limit: { limit } }) => {
     await ensureDataFiles();
     const history = JSON.parse(await fs.readFile(HISTORY_FILE, "utf-8"));
-    return { content: [{ type: "text", text: JSON.stringify(history.slice(0, limit), null, 2) }] };
+    return {
+        content: [
+            {
+                type: "text",
+                text: JSON.stringify(history.slice(0, limit), null, 2),
+            },
+        ],
+    };
 });
 // Tool: export_collection (Postman v2.1 subset)
 server.tool("export_collection", "Export a collection to Postman v2.1 JSON (subset)", { data: z.object({ collectionId: z.string() }) }, async ({ data: { collectionId } }) => {
@@ -571,20 +776,54 @@ server.tool("export_collection", "Export a collection to Postman v2.1 JSON (subs
         name: r.name,
         request: {
             method: r.method,
-            header: Object.entries(r.headers).map(([key, value]) => ({ key, value })),
+            header: Object.entries(r.headers).map(([key, value]) => ({
+                key,
+                value,
+            })),
             url: r.url,
-            body: r.body ? { mode: "raw", raw: typeof r.body === "string" ? r.body : JSON.stringify(r.body, null, 2) } : undefined,
+            body: r.body
+                ? {
+                    mode: "raw",
+                    raw: typeof r.body === "string"
+                        ? r.body
+                        : JSON.stringify(r.body, null, 2),
+                }
+                : undefined,
         },
-        _mcp: { id: r.id, variables: r.variables, auth: r.auth, preRequestScript: r.preRequestScript, testScript: r.testScript },
+        _mcp: {
+            id: r.id,
+            variables: r.variables,
+            auth: r.auth,
+            preRequestScript: r.preRequestScript,
+            testScript: r.testScript,
+        },
     });
-    const mapFolder = (f) => ({ name: f.name, item: [...f.requests.map(mapRequest), ...f.folders.map(mapFolder)] });
+    const mapFolder = (f) => ({
+        name: f.name,
+        item: [...f.requests.map(mapRequest), ...f.folders.map(mapFolder)],
+    });
     const exported = {
-        info: { name: col.name, schema: "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
-        item: [...col.requests.map(mapRequest), ...(col.folders || []).map(mapFolder)],
-        variable: col.variables ? Object.entries(col.variables).map(([key, value]) => ({ key, value })) : undefined,
-        _mcp: { id: col.id, auth: col.auth, preRequestScript: col.preRequestScript, testScript: col.testScript },
+        info: {
+            name: col.name,
+            schema: "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+        },
+        item: [
+            ...col.requests.map(mapRequest),
+            ...(col.folders || []).map(mapFolder),
+        ],
+        variable: col.variables
+            ? Object.entries(col.variables).map(([key, value]) => ({ key, value }))
+            : undefined,
+        _mcp: {
+            id: col.id,
+            auth: col.auth,
+            preRequestScript: col.preRequestScript,
+            testScript: col.testScript,
+        },
     };
-    return { content: [{ type: "text", text: JSON.stringify(exported, null, 2) }] };
+    return {
+        content: [{ type: "text", text: JSON.stringify(exported, null, 2) }],
+    };
 });
 // Tool: import_postman_collection (subset)
 server.tool("import_postman_collection", "Import a Postman collection v2.1 JSON (subset supported)", { data: z.object({ json: z.string() }) }, async ({ data: { json } }) => {
@@ -603,9 +842,14 @@ server.tool("import_postman_collection", "Import a Postman collection v2.1 JSON 
         id: genId(),
         name: it.name || "request",
         method: (it.request?.method || "GET").toUpperCase(),
-        url: typeof it.request?.url === "string" ? it.request.url : it.request?.url?.raw || "",
-        headers: (it.request?.header || []).reduce((acc, h) => { if (h && h.key)
-            acc[h.key] = h.value || ""; return acc; }, {}),
+        url: typeof it.request?.url === "string"
+            ? it.request.url
+            : it.request?.url?.raw || "",
+        headers: (it.request?.header || []).reduce((acc, h) => {
+            if (h && h.key)
+                acc[h.key] = h.value || "";
+            return acc;
+        }, {}),
         body: it.request?.body?.raw ? it.request.body.raw : undefined,
         createdAt: new Date().toISOString(),
         variables: it._mcp?.variables,
@@ -617,24 +861,59 @@ server.tool("import_postman_collection", "Import a Postman collection v2.1 JSON 
         id: genId(),
         name: item.name || "folder",
         requests: (item.item || []).filter((x) => x.request).map(toRequest),
-        folders: (item.item || []).filter((x) => x.item && !x.request).map(toFolder),
+        folders: (item.item || [])
+            .filter((x) => x.item && !x.request)
+            .map(toFolder),
         createdAt: new Date().toISOString(),
     });
     const collection = {
         id: genId(),
         name: parsed.info?.name || "Imported",
         requests: parsed.item.filter((x) => x.request).map(toRequest),
-        folders: parsed.item.filter((x) => x.item && !x.request).map(toFolder),
+        folders: parsed.item
+            .filter((x) => x.item && !x.request)
+            .map(toFolder),
         createdAt: new Date().toISOString(),
-        variables: (parsed.variable || []).reduce((acc, v) => { if (v.key)
-            acc[v.key] = v.value || ""; return acc; }, {}),
+        variables: (parsed.variable || []).reduce((acc, v) => {
+            if (v.key)
+                acc[v.key] = v.value || "";
+            return acc;
+        }, {}),
         auth: parsed._mcp?.auth,
         preRequestScript: parsed._mcp?.preRequestScript,
         testScript: parsed._mcp?.testScript,
     };
     collections.push(collection);
     await fs.writeFile(COLLECTIONS_FILE, JSON.stringify(collections, null, 2), "utf-8");
-    return { content: [{ type: "text", text: JSON.stringify(collection, null, 2) }] };
+    return {
+        content: [{ type: "text", text: JSON.stringify(collection, null, 2) }],
+    };
+});
+const jwtSecret = process.env.JWT_SECRET || "";
+if (!jwtSecret) {
+    console.error("JWT_SECRET environment variable is not set, bearer token validation will not work");
+}
+server.tool("validate", "Validate bearer token and return user's phone number in {country_code}{number} format", {
+    data: z.object({
+        token: z.string().min(1, "Bearer token required"),
+    }),
+}, async ({ data: { token } }) => {
+    let decoded;
+    try {
+        decoded = jwt.decode(token, jwtSecret);
+        if (!decoded || !decoded.phone_number)
+            throw new Error("phone_number not found in token");
+    }
+    catch (e) {
+        throw new Error("Invalid token: " + (e?.message || e));
+    }
+    // Extract phone number in format +91-9876543210 or +919876543210
+    let raw = decoded.phone_number;
+    let match = raw.match(/^\+?(\d{1,3})[-\s]?(\d{6,})$/);
+    if (!match)
+        throw new Error("Invalid phone number format in token");
+    const phone = `${match[1]}${match[2]}`;
+    return { content: [{ type: "text", text: phone }] };
 });
 // Start the MCP server
 async function main() {
@@ -652,15 +931,16 @@ async function main() {
     await server.connect(transport);
     console.error("MCP server started on stdin/stdout transport");
     const rawPort = process.env.PORT || process.env.WEBSITE_PORT || "3000";
-    const port = parseInt(rawPort, 10);
-    if (Number.isNaN(port)) {
+    if (Number.isNaN(rawPort)) {
         console.error(`Invalid port value "${rawPort}", defaulting to 3000`);
     }
-    const healthServer = http.createServer((_req, res) => {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ status: "ok", time: new Date().toISOString() }));
+    const serverHttp = createServer((req, res) => {
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        res.end("MCP Postman server is running");
     });
-    healthServer.listen(port, () => console.error(`Health endpoint on :${port}`));
+    serverHttp.listen(rawPort, () => {
+        console.error(`[lifecycle] HTTP server listening on port ${rawPort}`);
+    });
     // Global error handlers
     process.on("uncaughtException", (err) => {
         console.error("[fatal] uncaughtException", err);
@@ -671,7 +951,7 @@ async function main() {
     // Graceful shutdown
     const shutdown = (signal) => {
         console.error(`[lifecycle] Received ${signal}, shutting down gracefully...`);
-        healthServer.close(() => {
+        serverHttp.close(() => {
             console.error("[lifecycle] HTTP server closed");
             // Delay a bit to flush logs
             setTimeout(() => process.exit(0), 200);
@@ -682,14 +962,14 @@ async function main() {
             process.exit(1);
         }, 5000).unref();
     };
-    ["SIGTERM", "SIGINT"].forEach(sig => process.on(sig, () => shutdown(sig)));
+    ["SIGTERM", "SIGINT"].forEach((sig) => process.on(sig, () => shutdown(sig)));
     // Keep-alive heartbeat (covers edge case where event loop empties)
     const heartbeat = setInterval(() => {
         console.error(`[heartbeat] ${new Date().toISOString()}`);
     }, 60_000);
     heartbeat.unref();
 }
-main().catch(err => {
+main().catch((err) => {
     console.error("Fatal startup error:", err);
     process.exit(1);
 });
