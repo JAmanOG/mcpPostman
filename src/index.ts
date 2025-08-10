@@ -9,6 +9,9 @@ import http from "http";
 import { fileURLToPath } from "url";
 import express from 'express';
 import jwt from "jsonwebtoken";
+import { config } from "dotenv";
+
+config();
 
 const app = express();
 
@@ -802,6 +805,11 @@ server.tool(
   }
 );
 
+const jwtSecret:any = process.env.JWT_SECRET || "";
+if (!jwtSecret) {
+  console.error("JWT_SECRET environment variable is not set, bearer token validation will not work");
+}
+
 server.tool(
   "validate",
   "Validate bearer token and return user's phone number in {country_code}{number} format",
@@ -811,10 +819,9 @@ server.tool(
     }),
   },
   async ({ data: { token } }) => {
-    // Replace 'your-secret' with your JWT secret or use public key as needed
     let decoded: any;
     try {
-      decoded = jwt.decode(token); // Use jwt.verify(token, 'your-secret') for real validation
+      decoded = jwt.decode(token, jwtSecret);
       if (!decoded || !decoded.phone_number) throw new Error("phone_number not found in token");
     } catch (e: any) {
       throw new Error("Invalid token: " + (e?.message || e));

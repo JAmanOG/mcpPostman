@@ -3,6 +3,10 @@
         "cloud-deployed-mcp": {
             "type": "sse",
             "url": "https://mcppostman-b5ang7abh8hsd8eq.centralindia-01.azurewebsites.net"
-        }
+        },
+        "new_MCP_Server": {
+            "type": "sse",
+            "url": "https://mcppostman.onrender.com"
+        },
     }
 }
