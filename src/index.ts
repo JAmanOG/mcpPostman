@@ -7,6 +7,9 @@ import crypto from "crypto";
 import vm from "vm";
 import http from "http";
 import { fileURLToPath } from "url";
+import express from 'express';
+
+const app = express();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -859,6 +862,28 @@ async function main() {
   }, 60_000);
   heartbeat.unref();
 }
+
+app.get('/sse', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  // Optional: disable proxy buffering
+  res.flushHeaders?.();
+
+  const heartbeat = setInterval(() => {
+      res.write(':\n\n'); // comment heartbeat
+  }, 15000);
+
+  // Example initial event (adjust to MCP protocol your client expects)
+  res.write(`event: ready\ndata: {"status":"ok"}\n\n`);
+
+  req.on('close', () => {
+      clearInterval(heartbeat);
+  });
+});
+
+app.get('/', (_, res) => res.send('MCP SSE server running'));
+
 
 main().catch(err => {
   console.error("Fatal startup error:", err);
