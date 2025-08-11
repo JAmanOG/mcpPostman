@@ -100,7 +100,7 @@ class StoredRequest(BaseModel):
     name: str
     method: str
     url: str
-    headers: Dict[str, str] = {}
+    headers: Dict[str, str] = Field(default_factory=dict)
     body: Optional[Any] = None
     createdAt: str
     variables: Optional[Dict[str, str]] = None
@@ -111,16 +111,16 @@ class StoredRequest(BaseModel):
 class Folder(BaseModel):
     id: str
     name: str
-    requests: List[StoredRequest] = []
-    folders: List['Folder'] = []
+    requests: List[StoredRequest] = Field(default_factory=list)
+    folders: List['Folder'] = Field(default_factory=list)
     createdAt: str
     variables: Optional[Dict[str, str]] = None
 
 class Collection(BaseModel):
     id: str
     name: str
-    requests: List[StoredRequest] = []
-    folders: List[Folder] = []
+    requests: List[StoredRequest] = Field(default_factory=list)
+    folders: List[Folder] = Field(default_factory=list)
     createdAt: str
     variables: Optional[Dict[str, str]] = None
     auth: Optional[AuthConfig] = None
@@ -266,7 +266,7 @@ async def get_user_meta(user_id: str) -> Dict[str, Any]:
         meta = {"role": DEFAULT_ROLE, "classification": None, "createdAt": datetime.now(timezone.utc).isoformat()}
         r.set(_user_meta_key(user_id), json.dumps(meta))
         return meta
-    return json.loads(raw)
+    return json.loads(raw)# type: ignore
 
 async def set_user_meta(user_id: str, role: Optional[str] = None, classification: Optional[str] = None):
     meta = await get_user_meta(user_id)
@@ -331,7 +331,7 @@ async def read_user_json(user_id: str, kind: str) -> Any:
     if raw is None:
         await ensure_user_data(user_id)
         raw = r.get(redis_key) or 'null'
-    return json.loads(raw)
+    return json.loads(raw)# type: ignore
 
 async def write_user_json(user_id: str, kind: str, data: Any):
     keys = user_keys(user_id)
@@ -491,7 +491,7 @@ async def send_request(
             raise McpError(ErrorData(code=INVALID_PARAMS, message="Stored request not found"))
         request = stored.model_dump()
     else:
-        request = {"id": gen_id(), "name": "ad-hoc", "method": method.upper(), "url": url, "headers": headers or {}, "body": body, "createdAt": datetime.now().isoformat(), "variables": {}}
+        request = {"id": gen_id(), "name": "ad-hoc", "method": method.upper(), "url": url, "headers": headers or {}, "body": body, "createdAt": datetime.now().isoformat(), "variables": {}} # type: ignore
     env_vars = {}
     if environment_id:
         envs = await read_user_json(puch_user_id, 'environments')
@@ -1047,7 +1047,7 @@ async def list_requests_per_user( # type: ignore
 
 # --- REPLACED: environments per-user ---
 @mcp.tool(name="create_environment")
-async def create_environment_per_user(
+async def create_environment_per_user( # type: ignore
     puch_user_id: Annotated[str, Field(description="User id performing action")],
     name: Annotated[str, Field(description="Environment name")],
     variables: Annotated[Dict[str, str], Field(description="Variables map")],
@@ -1061,7 +1061,7 @@ async def create_environment_per_user(
     return json.dumps(env, indent=2)
 
 @mcp.tool(name="update_environment")
-async def update_environment_per_user(
+async def update_environment_per_user( # type: ignore
     puch_user_id: Annotated[str, Field(description="User id performing action")],
     environment_ref: Annotated[str, Field(description="Environment id or name")],
     variables: Annotated[Dict[str, str], Field(description="Variables to merge")],
@@ -1075,7 +1075,7 @@ async def update_environment_per_user(
     return json.dumps(env, indent=2)
 
 @mcp.tool(name="delete_environment")
-async def delete_environment_per_user(
+async def delete_environment_per_user( # type: ignore
     puch_user_id: Annotated[str, Field(description="User id performing action")],
     environment_ref: Annotated[str, Field(description="Environment id or name")],
 ) -> str:
@@ -1089,7 +1089,7 @@ async def delete_environment_per_user(
     return json.dumps({"deleted": target_id}, indent=2)
 
 @mcp.tool(name="list_environments")
-async def list_environments_per_user(
+async def list_environments_per_user( # type: ignore
     puch_user_id: Annotated[str, Field(description="User id performing action")]
 ) -> str:
     await require_permission(puch_user_id, A_READ)
@@ -1099,114 +1099,15 @@ async def list_environments_per_user(
 
 # --- REPLACED: history per-user ---
 @mcp.tool(name="history")
-async def history_per_user(
+async def history_per_user( # type: ignore
     puch_user_id: Annotated[str, Field(description="User id performing action")],
     limit: Annotated[int, Field(description="Max entries", ge=1, le=100)] = 20,
 ) -> str:
     await require_permission(puch_user_id, A_READ)
     await ensure_user_data(puch_user_id)
-    h = await read_user_json(puch_user_id, 'history')
-    return json.dumps(h[:limit], indent=2)
+    entries = await read_user_json(puch_user_id, 'history')
+    return json.dumps(entries[:limit], indent=2)
 
-# --- REPLACED: export_collection / import_postman_collection per-user ---
-@mcp.tool(name="export_collection")
-async def export_collection_per_user(
-    puch_user_id: Annotated[str, Field(description="User id performing action")],
-    collection_ref: Annotated[str, Field(description="Collection id or name")],
-) -> str:
-    await require_permission(puch_user_id, A_EXPORT)
-    await ensure_user_data(puch_user_id)
-    collections = await read_user_json(puch_user_id, 'collections')
-    col = await _resolve_collection(collections, collection_ref)
-    col_obj = Collection(**col)
-    def map_request(r: StoredRequest) -> Dict[str, Any]:
-        return {
-            "name": r.name,
-            "request": {
-                "method": r.method,
-                "header": [{"key": k, "value": v} for k, v in r.headers.items()],
-                "url": r.url,
-                "body": {"mode": "raw", "raw": json.dumps(r.body) if isinstance(r.body, dict) else str(r.body)} if r.body is not None else None,
-            },
-            "_mcp": {
-                "id": r.id,
-                "variables": r.variables,
-                "auth": r.auth.model_dump() if r.auth else None,
-                "preRequestScript": r.preRequestScript,
-                "testScript": r.testScript,
-            },
-        }
-    def map_folder(f: Folder) -> Dict[str, Any]:
-        return {
-            "name": f.name,
-            "item": [map_request(r) for r in f.requests] + [map_folder(sf) for sf in f.folders],
-        }
-    exported = {
-        "info": {"name": col_obj.name, "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
-        "item": [map_request(r) for r in col_obj.requests] + [map_folder(f) for f in col_obj.folders],
-        "variable": [{"key": k, "value": v} for k, v in (col_obj.variables or {}).items()],
-        "_mcp": {
-            "id": col_obj.id,
-            "auth": col_obj.auth.model_dump() if col_obj.auth else None,
-            "preRequestScript": col_obj.preRequestScript,
-            "testScript": col_obj.testScript,
-        },
-    }
-    return json.dumps(exported, indent=2)
-
-@mcp.tool(name="import_postman_collection")
-async def import_postman_collection_per_user(
-    puch_user_id: Annotated[str, Field(description="User id performing action")],
-    json_data: Annotated[str, Field(description="Postman collection JSON")],
-    overwrite_name: Annotated[Optional[str], Field(description="Optional new collection name")]=None,
-) -> str:
-    await require_permission(puch_user_id, A_IMPORT)
-    await ensure_user_data(puch_user_id)
-    try:
-        parsed = json.loads(json_data)
-    except json.JSONDecodeError:
-        raise McpError(ErrorData(code=INVALID_PARAMS, message="Invalid JSON"))
-    if not isinstance(parsed.get('item'), list):
-        raise McpError(ErrorData(code=INVALID_PARAMS, message="Unsupported collection format"))
-    collections = await read_user_json(puch_user_id, 'collections')
-    def to_request(item: Dict[str, Any]) -> Dict[str, Any]:
-        body_raw = item.get('request', {}).get('body', {})
-        body_val = body_raw.get('raw') if isinstance(body_raw, dict) else None
-        return {
-            'id': gen_id(),
-            'name': item.get('name') or 'request',
-            'method': (item.get('request', {}).get('method') or 'GET').upper(),
-            'url': item.get('request', {}).get('url', {}).get('raw') or item.get('request', {}).get('url') or '',
-            'headers': {h['key']: h['value'] for h in item.get('request', {}).get('header', []) if isinstance(h, dict) and 'key' in h},
-            'body': body_val,
-            'createdAt': datetime.now().isoformat(),
-            'variables': item.get('_mcp', {}).get('variables'),
-            'auth': item.get('_mcp', {}).get('auth'),
-            'preRequestScript': item.get('_mcp', {}).get('preRequestScript'),
-            'testScript': item.get('_mcp', {}).get('testScript'),
-        }
-    def to_folder(item: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            'id': gen_id(),
-            'name': item.get('name') or 'folder',
-            'requests': [to_request(i) for i in item.get('item', []) if i.get('request')],
-            'folders': [to_folder(i) for i in item.get('item', []) if not i.get('request') and i.get('item')],
-            'createdAt': datetime.now().isoformat(),
-        }
-    collection = {
-        'id': gen_id(),
-        'name': overwrite_name or parsed.get('info', {}).get('name') or 'Imported',
-        'requests': [to_request(i) for i in parsed.get('item', []) if i.get('request')],
-        'folders': [to_folder(i) for i in parsed.get('item', []) if not i.get('request') and i.get('item')],
-        'createdAt': datetime.now().isoformat(),
-        'variables': {v['key']: v['value'] for v in parsed.get('variable', []) if isinstance(v, dict) and 'key' in v},
-        'auth': parsed.get('_mcp', {}).get('auth'),
-        'preRequestScript': parsed.get('_mcp', {}).get('preRequestScript'),
-        'testScript': parsed.get('_mcp', {}).get('testScript'),
-    }
-    collections.append(collection)
-    await write_user_json(puch_user_id, 'collections', collections)
-    return json.dumps(collection, indent=2)
 
 # Helper: resolve environment by id or (unique) name within user namespace (with legacy migration)
 async def _resolve_environment(user_id: str, env_ref: str) -> Dict[str, Any]:
@@ -1600,10 +1501,10 @@ async def history_per_user(
 ) -> str:
     await require_permission(puch_user_id, A_READ)
     await ensure_user_data(puch_user_id)
-    entries = await read_user_json(puch_user_id, limit)
-    return json.dumps(entries, indent=2)
+    # FIX: previously passed numeric limit as 'kind' causing KeyError. Retrieve 'history' then slice.
+    entries = await read_user_json(puch_user_id, 'history')
+    return json.dumps(entries[:limit], indent=2)
 
-# --- REPLACED: export_collection / import_postman_collection per-user ---
 @mcp.tool(name="export_collection")
 async def export_collection_per_user(
     puch_user_id: Annotated[str, Field(description="User id performing action")],
@@ -1614,14 +1515,21 @@ async def export_collection_per_user(
     collections = await read_user_json(puch_user_id, 'collections')
     col = await _resolve_collection(collections, collection_ref)
     col_obj = Collection(**col)
+
     def map_request(r: StoredRequest) -> Dict[str, Any]:
+        body_block = None
+        if r.body is not None:
+            if isinstance(r.body, dict):
+                body_block = {"mode": "raw", "raw": json.dumps(r.body)}
+            else:
+                body_block = {"mode": "raw", "raw": str(r.body)}
         return {
             "name": r.name,
             "request": {
                 "method": r.method,
                 "header": [{"key": k, "value": v} for k, v in r.headers.items()],
                 "url": r.url,
-                "body": {"mode": "raw", "raw": json.dumps(r.body) if isinstance(r.body, dict) else str(r.body)} if r.body is not None else None,
+                "body": body_block,
             },
             "_mcp": {
                 "id": r.id,
@@ -1631,13 +1539,24 @@ async def export_collection_per_user(
                 "testScript": r.testScript,
             },
         }
+
     def map_folder(f: Folder) -> Dict[str, Any]:
         return {
             "name": f.name,
             "item": [map_request(r) for r in f.requests] + [map_folder(sf) for sf in f.folders],
+            "_mcp": {
+                "id": f.id,
+                "variables": f.variables,
+            },
         }
+
     exported = {
-        "info": {"name": col_obj.name, "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+        "info": {
+            "name": col_obj.name,
+            "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+            "description": col.get("description"),
+            "_postman_id": col_obj.id,  # optional compatibility
+        },
         "item": [map_request(r) for r in col_obj.requests] + [map_folder(f) for f in col_obj.folders],
         "variable": [{"key": k, "value": v} for k, v in (col_obj.variables or {}).items()],
         "_mcp": {
@@ -1652,56 +1571,133 @@ async def export_collection_per_user(
 @mcp.tool(name="import_postman_collection")
 async def import_postman_collection_per_user(
     puch_user_id: Annotated[str, Field(description="User id performing action")],
-    json_data: Annotated[str, Field(description="Postman collection JSON")],
-    overwrite_name: Annotated[Optional[str], Field(description="Optional new collection name")]=None,
+    json_data: Annotated[str, Field(description="Postman collection JSON (single, bundle, or list)")],
+    overwrite_name: Annotated[Optional[str], Field(description="Force a name for single collection (ignored for bundles)")] = None,
 ) -> str:
     await require_permission(puch_user_id, A_IMPORT)
     await ensure_user_data(puch_user_id)
+
+    if not json_data or not json_data.strip():
+        raise McpError(ErrorData(code=INVALID_PARAMS, message="Empty JSON payload"))
+
     try:
         parsed = json.loads(json_data)
-    except json.JSONDecodeError:
-        raise McpError(ErrorData(code=INVALID_PARAMS, message="Invalid JSON"))
-    if not isinstance(parsed.get('item'), list):
-        raise McpError(ErrorData(code=INVALID_PARAMS, message="Unsupported collection format"))
-    collections = await read_user_json(puch_user_id, 'collections')
-    def to_request(item: Dict[str, Any]) -> Dict[str, Any]:
-        body_raw = item.get('request', {}).get('body', {})
-        body_val = body_raw.get('raw') if isinstance(body_raw, dict) else None
+    except json.JSONDecodeError as e:
+        raise McpError(ErrorData(code=INVALID_PARAMS, message=f"Invalid JSON: {e.msg}"))
+
+    if isinstance(parsed, dict) and "item" in parsed:
+        raw_collections = [parsed]
+    elif isinstance(parsed, dict) and isinstance(parsed.get("collections"), list):
+        raw_collections = [c for c in parsed["collections"] if isinstance(c, dict) and "item" in c]
+    elif isinstance(parsed, list):
+        raw_collections = [c for c in parsed if isinstance(c, dict) and "item" in c]
+    else:
+        raise McpError(ErrorData(code=INVALID_PARAMS, message="Unsupported format (expected single collection, {collections:[]}, or list)"))
+
+    if not raw_collections:
+        raise McpError(ErrorData(code=INVALID_PARAMS, message="No collection objects found"))
+
+    existing = await read_user_json(puch_user_id, 'collections')
+    if not isinstance(existing, list):
+        existing = []
+
+    def normalize_headers(request_dict: Dict[str, Any]) -> Dict[str, str]:
+        hdrs = request_dict.get("header") or request_dict.get("headers") or []
+        out: Dict[str, str] = {}
+        for h in hdrs:
+            if isinstance(h, dict):
+                k = h.get("key") or h.get("name")
+                if k:
+                    out[k] = "" if h.get("value") is None else str(h.get("value"))
+        return out
+
+    def extract_body(req_block: Dict[str, Any]) -> Any:
+        body = req_block.get("body")
+        if not body:
+            return None
+        mode = body.get("mode")
+        if mode == "raw":
+            return body.get("raw")
+        # Fallback: store whole structure
+        return body
+
+    def to_request(node: Dict[str, Any]) -> Dict[str, Any]:
+        req_block = node.get("request") or {}
+        method = (req_block.get("method") or node.get("method") or "GET").upper()
+        url = req_block.get("url") or node.get("url") or ""
+        if isinstance(url, dict):
+            url = url.get("raw") or ""
+        meta = node.get("_mcp", {})
         return {
-            'id': gen_id(),
-            'name': item.get('name') or 'request',
-            'method': (item.get('request', {}).get('method') or 'GET').upper(),
-            'url': item.get('request', {}).get('url', {}).get('raw') or item.get('request', {}).get('url') or '',
-            'headers': {h['key']: h['value'] for h in item.get('request', {}).get('header', []) if isinstance(h, dict) and 'key' in h},
-            'body': body_val,
-            'createdAt': datetime.now().isoformat(),
-            'variables': item.get('_mcp', {}).get('variables'),
-            'auth': item.get('_mcp', {}).get('auth'),
-            'preRequestScript': item.get('_mcp', {}).get('preRequestScript'),
-            'testScript': item.get('_mcp', {}).get('testScript'),
+            "id": meta.get("id") or node.get("id") or gen_id(),
+            "name": node.get("name") or "Untitled Request",
+            "method": method,
+            "url": url,
+            "headers": normalize_headers(req_block),
+            "body": extract_body(req_block),
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+            "variables": meta.get("variables") or {},
+            "auth": meta.get("auth"),
+            "preRequestScript": meta.get("preRequestScript"),
+            "testScript": meta.get("testScript"),
         }
-    def to_folder(item: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            'id': gen_id(),
-            'name': item.get('name') or 'folder',
-            'requests': [to_request(i) for i in item.get('item', []) if i.get('request')],
-            'folders': [to_folder(i) for i in item.get('item', []) if not i.get('request') and i.get('item')],
-            'createdAt': datetime.now().isoformat(),
+
+    def to_folder(node: Dict[str, Any]) -> Dict[str, Any]:
+        children = node.get("item") or []
+        meta = node.get("_mcp", {})
+        folder_obj = {
+            "id": meta.get("id") or node.get("id") or gen_id(),
+            "name": node.get("name") or "Folder",
+            "folders": [],
+            "requests": [],
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+            "variables": meta.get("variables"),
         }
-    collection = {
-        'id': gen_id(),
-        'name': overwrite_name or parsed.get('info', {}).get('name') or 'Imported',
-        'requests': [to_request(i) for i in parsed.get('item', []) if i.get('request')],
-        'folders': [to_folder(i) for i in parsed.get('item', []) if not i.get('request') and i.get('item')],
-        'createdAt': datetime.now().isoformat(),
-        'variables': {v['key']: v['value'] for v in parsed.get('variable', []) if isinstance(v, dict) and 'key' in v},
-        'auth': parsed.get('_mcp', {}).get('auth'),
-        'preRequestScript': parsed.get('_mcp', {}).get('preRequestScript'),
-        'testScript': parsed.get('_mcp', {}).get('testScript'),
-    }
-    collections.append(collection)
-    await write_user_json(puch_user_id, 'collections', collections)
-    return json.dumps(collection, indent=2)
+        for child in children:
+            if not isinstance(child, dict):
+                continue
+            if "item" in child and "request" not in child:
+                folder_obj["folders"].append(to_folder(child))
+            else:
+                folder_obj["requests"].append(to_request(child))
+        return folder_obj
+
+    imported = 0
+    for rc in raw_collections:
+        items = rc.get("item")
+        if not isinstance(items, list):
+            continue
+        info = rc.get("info") or {}
+        meta = rc.get("_mcp", {})
+        name = overwrite_name if (overwrite_name and len(raw_collections) == 1) else (info.get("name") or "Imported Collection")
+        col_obj = {
+            "id": meta.get("id") or info.get("_postman_id") or info.get("id") or gen_id(),
+            "name": name,
+            "description": info.get("description"),
+            "folders": [],
+            "requests": [],
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+            "variables": {v["key"]: v["value"] for v in (rc.get("variable") or []) if isinstance(v, dict) and "key" in v},
+            "auth": meta.get("auth"),
+            "preRequestScript": meta.get("preRequestScript"),
+            "testScript": meta.get("testScript"),
+        }
+        for element in items:
+            if not isinstance(element, dict):
+                continue
+            if "item" in element and "request" not in element:
+                col_obj["folders"].append(to_folder(element))
+            else:
+                col_obj["requests"].append(to_request(element))
+        existing.append(col_obj)
+        imported += 1
+
+    if imported == 0:
+        raise McpError(ErrorData(code=INVALID_PARAMS, message="No collections imported"))
+
+    await write_user_json(puch_user_id, 'collections', existing)
+    return json.dumps({"imported": imported, "totalCollections": len(existing)}, indent=2)
+
 
 # --- Diagnostic tool: list_folders ---
 ListFoldersDescription = RichToolDescription(
@@ -1734,7 +1730,7 @@ async def list_folders(
         # pick first
         collection_ref = user_cols[0].get('id')
     try:
-        col = await _resolve_collection(user_cols, collection_ref)
+        col = await _resolve_collection(user_cols, collection_ref) # type: ignore
     except McpError:
         return json.dumps({"error": "Collection not found in user namespace", "collection_ref": collection_ref}, indent=2)
     def build(folder_list):
@@ -1887,7 +1883,7 @@ async def move_folder(
         dest_parent = find_folder(col_obj, target_parent_folder_id) or locate_folder_obj_only(target_col, target_parent_folder_id)
         if not dest_parent:
             raise McpError(ErrorData(code=INVALID_PARAMS, message="Destination parent folder not found"))
-        dest_parent.folders.append(Folder(**moved_folder))
+        dest_parent.folders.append(Folder(**moved_folder)) # type: ignore
         target_col.update(json.loads(col_obj.model_dump_json()))
     else:
         target_col.setdefault('folders', []).append(moved_folder)
