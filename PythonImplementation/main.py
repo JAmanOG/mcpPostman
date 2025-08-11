@@ -1,6 +1,6 @@
-import asyncio
+import os, json, uuid, time, asyncio, base64
+import redis, httpx
 from typing import Annotated, Optional, Union, List, Dict, Any
-import os
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.bearer import BearerAuthProvider, RSAKeyPair
@@ -8,13 +8,8 @@ from mcp import ErrorData, McpError
 from mcp.server.auth.provider import AccessToken
 from mcp.types import TextContent, ImageContent, INVALID_PARAMS, INTERNAL_ERROR
 from pydantic import BaseModel, Field, AnyUrl, validator
-import json
-import uuid
-import time
 from datetime import datetime,timezone
-import httpx
-import base64
-import redis
+from textwrap import dedent  
 
 # Load env early
 load_dotenv()
@@ -349,6 +344,7 @@ async def write_user_json(user_id: str, kind: str, data: Any):
     get_redis().set(m[kind], json.dumps(data))
     
     # --- MCP Server Setup ---
+
 mcp = FastMCP(
     "Postman-like MCP Server",
     auth=SimpleBearerAuthProvider(TOKEN),
@@ -381,6 +377,42 @@ UserMetaGetDesc = RichToolDescription(
 @mcp.tool(description=UserMetaGetDesc.model_dump_json())
 async def get_my_metadata(puch_user_id: Annotated[str, Field(description="Your user id")]) -> str:
     meta = await get_user_meta(puch_user_id)
+    return json.dumps(meta, indent=2)
+
+@mcp.tool
+async def about() -> str:
+    """
+    Return a human-readable description of this MCP server for UI / client display.
+    """
+    description = dedent("""
+    MCP ReqForge Server is a Postman-like API automation and testing platform
+    exposed via the Model Context Protocol. It provides:
+      • Per-user RBAC, isolated collections, environments, globals, and history (Redis-backed)
+      • Hierarchical collections, folders, and requests with variable scoping
+      • Pre-request & test scripts (JavaScript) and auth inheritance (basic/bearer)
+      • Request execution with retries, variable resolution chain (local > request > collection > environment > global)
+      • Import / export (Postman subset) and rich history logging (tests + console output)
+      • User metadata & role management tools for multi-tenant agent workflows
+    Optimized for Puch.ai agent integration and scalable automation use cases.
+    """).strip()
+
+    meta = {
+        "name": "MCP ReqForge Server",
+        "version": "1.0",
+        "description": description,
+        "homepage": "https://mcppostman-1.onrender.com",
+        "try_link": "https://puch.ai/mcp/WoFsL1UMUc",
+        "features": [
+            "RBAC",
+            "Redis storage",
+            "Collections & folders",
+            "Variable resolution",
+            "Pre-request & test scripts",
+            "History & test reporting",
+            "Postman import/export",
+            "User metadata tools"
+        ]
+    }
     return json.dumps(meta, indent=2)
 
 
@@ -515,14 +547,30 @@ async def send_request(
             await asyncio.sleep(retry_backoff_ms / 1000)
 
     elapsed = int((time.time() - started_total) * 1000)
-    history = await read_user_json(puch_user_id, 'history')
-    history.insert(0, {"id": gen_id(), "request": {"method": req_resolved['method'], "url": req_resolved['url'], "headers": headers_with_auth, "body": req_resolved.get('body')}, "response": response_obj, "startedAt": datetime.now().isoformat(), "durationMs": elapsed, "tests": tests, "console": console_logs, "attempts": attempt, "lastError": last_error})
-    while len(history) > 200:
-        history.pop()
-    await write_user_json(puch_user_id, 'history', history)
-    return json.dumps({"response": response_obj, "attempts": attempt, "lastError": last_error, "resolvedUrl": req_resolved['url']}, indent=2)
-
-
+    history_entry = {
+        "id": gen_id(),
+        "request": {
+            "method": req_resolved['method'],
+            "url": req_resolved['url'],
+            "headers": headers_with_auth,
+            "body": req_resolved.get('body'),
+        },
+        "response": response_obj,
+        "startedAt": datetime.now().isoformat(),
+        "durationMs": elapsed,
+        "tests": tests,
+        "console": console_logs,
+        "attempts": attempt,
+        "lastError": last_error,
+    }
+    # Atomic append (no race) + legacy migration (remove old array growth code)
+    await append_history_entry(puch_user_id, history_entry)
+    return json.dumps({
+        "response": response_obj,
+        "attempts": attempt,
+        "lastError": last_error,
+        "resolvedUrl": req_resolved['url']
+    }, indent=2)
 
 @mcp.tool(description=GetGlobalsDescription.model_dump_json())
 async def get_globals() -> str:
@@ -1570,8 +1618,8 @@ async def history_per_user(
 ) -> str:
     await require_permission(puch_user_id, A_READ)
     await ensure_user_data(puch_user_id)
-    h = await read_user_json(puch_user_id, 'history')
-    return json.dumps(h[:limit], indent=2)
+    entries = await read_user_json(puch_user_id, limit)
+    return json.dumps(entries, indent=2)
 
 # --- REPLACED: export_collection / import_postman_collection per-user ---
 @mcp.tool(name="export_collection")
@@ -1691,7 +1739,7 @@ async def list_folders(
     if collection_ref is None:
         if not user_cols:
             # Attempt legacy migration (one-time) to help user
-           
+            
             legacy = await read_json(COLLECTIONS_KEY)
             if legacy:
                 # migrate all legacy collections to this user namespace
