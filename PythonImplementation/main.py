@@ -1,13 +1,13 @@
-import os, json, uuid, time, asyncio, base64
-import redis, httpx
-from typing import Annotated, Optional, Union, List, Dict, Any
+import os, json, uuid, asyncio, base64
+import redis
+from typing import Annotated, Optional, List, Dict, Any
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.bearer import BearerAuthProvider, RSAKeyPair
 from mcp import ErrorData, McpError
 from mcp.server.auth.provider import AccessToken
-from mcp.types import TextContent, ImageContent, INVALID_PARAMS, INTERNAL_ERROR
-from pydantic import BaseModel, Field, AnyUrl, validator
+from mcp.types import INVALID_PARAMS
+from pydantic import BaseModel, Field,  validator
 from datetime import datetime,timezone
 from textwrap import dedent  
 
@@ -353,9 +353,9 @@ mcp = FastMCP(
 
 # --- User Meta Tools ---
 UserMetaSetDesc = RichToolDescription(
-    description="Set a user's role and/or classification (admin only)",
-    use_when="You need to change access level or data classification for a user",
-    side_effects="Updates user metadata controlling RBAC",
+    description="Assign or change a user's role and optional data classification (admin only)",
+    use_when="You must elevate, restrict, or annotate another user's access scope",
+    side_effects="Persists new RBAC role / classification; immediately affects permissions",
 )
 
 @mcp.tool(description=UserMetaSetDesc.model_dump_json())
@@ -370,8 +370,8 @@ async def set_user_metadata(
     return json.dumps({"updated": meta, "target": target_user_id}, indent=2)
 
 UserMetaGetDesc = RichToolDescription(
-    description="Get your user metadata (role & classification)",
-    use_when="You need to know current permissions or classification context",
+    description="Retrieve your current role and classification metadata",
+    use_when="You need to confirm what actions you are permitted to perform",
 )
 
 @mcp.tool(description=UserMetaGetDesc.model_dump_json())
@@ -418,152 +418,70 @@ async def about() -> str:
 
 # --- Tool: validate (required by Puch) ---
 @mcp.tool
-async def validate() -> str:
+async def validate() -> str: # type: ignore
     return MY_NUMBER # type: ignore
 
 # --- Tool: set_globals ---
-SetGlobalsDescription = RichToolDescription(
-    description="Set or merge global variables",
-    use_when="You need to store variables that can be used across all requests",
+PerUserGlobalsSetDesc = RichToolDescription(
+    description="Set or merge per-user global variables (user-scoped, highest precedence)",
+    use_when="You want reusable key/value pairs accessible to all your requests and collections",
+    side_effects="Mutates only your user namespace global variable map; first call may migrate legacy shared values",
 )
 
-@mcp.tool(description=SetGlobalsDescription.model_dump_json())
-async def set_globals(
-    variables: Annotated[Dict[str, str], Field(description="Variables to set")]
-) -> str:
-    await ensure_data_files()
-    globals = await read_json(GLOBALS_KEY)
-    globals["variables"].update(variables)
-    await write_json(GLOBALS_KEY, globals)
-    return json.dumps(globals, indent=2)
+LEGACY_GLOBALS_MIGRATION_FLAG = "mcp:globals:migrated:peruser"  # redis key flag
 
-# --- Tool: get_globals ---
-GetGlobalsDescription = RichToolDescription(
-    description="Get global variables",
-    use_when="You need to retrieve all globally stored variables",
-)
+async def _maybe_migrate_legacy_globals(user_id: str): # type: ignore
+    r = get_redis()
+    if r.get(f"{LEGACY_GLOBALS_MIGRATION_FLAG}:{user_id}"):
+        return
+    # read legacy shared globals
+    try:
+        legacy = await read_json(GLOBALS_KEY)
+    except Exception:
+        legacy = None
+    user_globals = await read_user_json(user_id, 'globals')
+    if legacy and isinstance(legacy, dict):
+        legacy_vars = legacy.get('variables') or {}
+        if isinstance(legacy_vars, dict) and legacy_vars and not user_globals.get('variables'):
+            user_globals['variables'] = dict(legacy_vars)
+            await write_user_json(user_id, 'globals', user_globals)
+    r.set(f"{LEGACY_GLOBALS_MIGRATION_FLAG}:{user_id}", '1')
 
-SendRequestDescription = RichToolDescription(
-    description="Send an HTTP request (direct or stored)",
-    use_when="You want to execute an API request",
-    side_effects="Makes actual HTTP requests to external services",
-)
-
-# --- Tool: send_request ---
-@mcp.tool(description=SendRequestDescription.model_dump_json())
-async def send_request(
+@mcp.tool(name="set_globals", description=PerUserGlobalsSetDesc.model_dump_json())
+async def set_globals( # type: ignore
     puch_user_id: Annotated[str, Field(description="User id performing action")],
-    method: Annotated[Optional[str], Field(description="HTTP method for direct request")] = None,
-    url: Annotated[Optional[str], Field(description="URL for direct request")] = None,
-    headers: Annotated[Optional[Dict[str, str]], Field(description="Headers for direct request")] = None,
-    body: Annotated[Optional[Any], Field(description="Body for direct request")] = None,
-    stored_request_id: Annotated[Optional[str], Field(description="ID of stored request to send")] = None,
-    collection_id: Annotated[Optional[str], Field(description="ID of collection containing stored request")] = None,
-    environment_id: Annotated[Optional[str], Field(description="ID of environment to use")] = None,
-    local_variables: Annotated[Optional[Dict[str, str]], Field(description="Local variables for this request")] = None,
-    auth: Annotated[Optional[AuthConfig], Field(description="Auth override for this request")] = None,
-    timeout_ms: Annotated[int, Field(description="Request timeout in milliseconds")] = 30000,
-    max_attempts: Annotated[int, Field(description="Total attempts including first (>=1, default 2)")] = 2,
-    retry_backoff_ms: Annotated[int, Field(description="Backoff between attempts in ms")] = 300,
+    variables: Annotated[Dict[str, str], Field(description="Variables to upsert (merged)")],
 ) -> str:
-    await require_permission(puch_user_id, A_EXECUTE)
-    if not ((stored_request_id and collection_id) or (method and url)):
-        raise McpError(ErrorData(code=INVALID_PARAMS, message="Either provide stored_request_id + collection_id OR method + url"))
-    if max_attempts < 1:
-        max_attempts = 1
+    await require_permission(puch_user_id, A_UPDATE)
     await ensure_user_data(puch_user_id)
-    globals = await read_user_json(puch_user_id, 'globals')
-    col_obj = None
-    if stored_request_id:
-        collections = await read_user_json(puch_user_id, 'collections')
-        col = next((c for c in collections if c['id'] == collection_id), None)
-        if not col:
-            raise McpError(ErrorData(code=INVALID_PARAMS, message="Collection not found"))
-        col_obj = Collection(**col)
-        search_reqs = col_obj.requests.copy()
-        stack = col_obj.folders.copy()
-        while stack:
-            f = stack.pop()
-            search_reqs.extend(f.requests)
-            stack.extend(f.folders)
-        stored = next((r for r in search_reqs if r.id == stored_request_id), None)
-        if not stored:
-            raise McpError(ErrorData(code=INVALID_PARAMS, message="Stored request not found"))
-        request = stored.model_dump()
-    else:
-        request = {"id": gen_id(), "name": "ad-hoc", "method": method.upper(), "url": url, "headers": headers or {}, "body": body, "createdAt": datetime.now().isoformat(), "variables": {}} # type: ignore
-    env_vars = {}
-    if environment_id:
-        envs = await read_user_json(puch_user_id, 'environments')
-        env = next((e for e in envs if e['id'] == environment_id), None)
-        if not env:
-            raise McpError(ErrorData(code=INVALID_PARAMS, message="Environment not found"))
-        env_vars = env['variables']
-    local_vars = local_variables or {}
-    request_vars = request.get('variables') or {}
-    collection_vars = col_obj.variables if col_obj else {}
-    global_vars = globals.get('variables') or {}
-    chain = [local_vars, request_vars, collection_vars, env_vars, global_vars]
-    tests = []
-    console_logs = []
-    req_resolved = {**request, 'url': resolve_variables(request['url'], chain), 'headers': deep_apply(request['headers'], chain), 'body': deep_apply(request.get('body'), chain)}
-    effective_auth = auth or (AuthConfig(**request['auth']) if request.get('auth') else None)
-    headers_with_auth = apply_auth(req_resolved['headers'], effective_auth)
+    await _maybe_migrate_legacy_globals(puch_user_id)
+    globals_obj = await read_user_json(puch_user_id, 'globals')
+    globals_obj.setdefault('variables', {}).update(variables)
+    await write_user_json(puch_user_id, 'globals', globals_obj)
+    return json.dumps(globals_obj, indent=2)
 
-    last_error: Optional[str] = None
-    response_obj: Dict[str, Any] = {"status": 0, "statusText": "UNSENT", "headers": {}, "body": None}
-    attempt = 0
-    started_total = time.time()
-    while attempt < max_attempts:
-        attempt += 1
-        try:
-            async with httpx.AsyncClient() as client:
-                req_kwargs = {"method": req_resolved['method'], "headers": headers_with_auth, "timeout": timeout_ms/1000}
-                if req_resolved.get('body') is not None and req_resolved['method'] != 'GET':
-                    if isinstance(req_resolved['body'], dict):
-                        req_kwargs['headers']['Content-Type'] = 'application/json'
-                        req_kwargs['json'] = req_resolved['body']
-                    else:
-                        req_kwargs['content'] = str(req_resolved['body'])
-                r = await client.request(url=req_resolved['url'], **req_kwargs)
-                try:
-                    parsed = r.json()
-                except ValueError:
-                    parsed = r.text
-                response_obj = {"status": r.status_code, "statusText": r.reason_phrase, "headers": dict(r.headers), "body": parsed}
-                # Retry on 5xx if attempts remain
-                if 500 <= r.status_code < 600 and attempt < max_attempts:
-                    last_error = f"Server error {r.status_code}, retrying {attempt}/{max_attempts}"
-                else:
-                    last_error = None
-                    break
-        except Exception as e:
-            last_error = str(e)
-            if attempt >= max_attempts:
-                response_obj = {"status": 0, "statusText": "ERROR", "headers": {}, "body": last_error}
-                break
-        # backoff if another attempt pending
-        if attempt < max_attempts and retry_backoff_ms > 0:
-            await asyncio.sleep(retry_backoff_ms / 1000)
+PerUserGlobalsGetDesc = RichToolDescription(
+    description="Retrieve your per-user global variables",
+    use_when="You need to inspect or reuse globally scoped variables for this user",
+)
 
-    elapsed = int((time.time() - started_total) * 1000)
-    history = await read_user_json(puch_user_id, 'history')
-    history.insert(0, {"id": gen_id(), "request": {"method": req_resolved['method'], "url": req_resolved['url'], "headers": headers_with_auth, "body": req_resolved.get('body')}, "response": response_obj, "startedAt": datetime.now().isoformat(), "durationMs": elapsed, "tests": tests, "console": console_logs, "attempts": attempt, "lastError": last_error})
-    while len(history) > 200:
-        history.pop()
-    await write_user_json(puch_user_id, 'history', history)
-    return json.dumps({"response": response_obj, "attempts": attempt, "lastError": last_error, "resolvedUrl": req_resolved['url']}, indent=2)
 
-@mcp.tool(description=GetGlobalsDescription.model_dump_json())
-async def get_globals() -> str:
-    await ensure_data_files()
-    globals = await read_json(GLOBALS_KEY)
-    return json.dumps(globals, indent=2)
+@mcp.tool(name="get_globals", description=PerUserGlobalsGetDesc.model_dump_json())
+async def get_globals( # type: ignore
+    puch_user_id: Annotated[str, Field(description="User id performing action")]
+) -> str:
+    await require_permission(puch_user_id, A_READ)
+    await ensure_user_data(puch_user_id)
+    await _maybe_migrate_legacy_globals(puch_user_id)
+    globals_obj = await read_user_json(puch_user_id, 'globals')
+    return json.dumps(globals_obj, indent=2)
+
 
 # --- Tool: create_collection ---
 CreateCollectionDescription = RichToolDescription(
-    description="Create a new request collection",
-    use_when="You want to group related API requests together",
+    description="Create a new empty collection to group related requests and folders",
+    use_when="You are organizing APIs and need a fresh logical container",
+    side_effects="Persists a new collection in the user's namespace",
 )
 
 @mcp.tool(description=CreateCollectionDescription.model_dump_json())
@@ -595,8 +513,9 @@ async def create_collection(
 
 # --- Tool: update_collection ---
 UpdateCollectionDescription = RichToolDescription(
-    description="Update collection name/variables/auth/scripts",
-    use_when="You need to modify an existing collection",
+    description="Modify an existing collection's name, variables, auth, or scripts",
+    use_when="You need to adjust collection-level configuration or metadata",
+    side_effects="Updates stored collection definition",
 )
 
 @mcp.tool(description=UpdateCollectionDescription.model_dump_json())
@@ -637,8 +556,9 @@ async def update_collection(
 
 # --- Tool: delete_collection ---
 DeleteCollectionDescription = RichToolDescription(
-    description="Delete a collection",
-    use_when="You want to remove an entire collection",
+    description="Remove a collection and all its folders/requests permanently",
+    use_when="A collection is obsolete and should be fully deleted",
+    side_effects="Irreversibly deletes collection data (no recycle bin)",
 )
 
 @mcp.tool(description=DeleteCollectionDescription.model_dump_json())
@@ -660,8 +580,8 @@ async def delete_collection(
 
 # --- Tool: list_collections ---
 ListCollectionsDescription = RichToolDescription(
-    description="List all collections for the user",
-    use_when="You want to see your collections",
+    description="List all collections owned by the user",
+    use_when="You need to browse, select, or reference a collection id",
 )
 
 @mcp.tool(description=ListCollectionsDescription.model_dump_json())
@@ -675,8 +595,8 @@ async def list_collections(
 
 # --- Tool: get_collection_id ---
 GetCollectionIdDescription = RichToolDescription(
-    description="Get collection id(s) by exact collection name",
-    use_when="You have a collection name and need its id",
+    description="Resolve one or more collection ids by exact name match",
+    use_when="You have a collection name and must operate on its id",
 )
 
 @mcp.tool(description=GetCollectionIdDescription.model_dump_json())
@@ -695,8 +615,8 @@ async def get_collection_id(
 
 # --- Tool: get_collection_name ---
 GetCollectionNameDescription = RichToolDescription(
-    description="Get collection name by id",
-    use_when="You have a collection id and need its name",
+    description="Get the human-readable name for a collection id",
+    use_when="You only have the id and want to display or confirm the name",
 )
 
 @mcp.tool(description=GetCollectionNameDescription.model_dump_json())
@@ -722,8 +642,8 @@ def _walk_folders(folders: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 # --- Tool: get_folder_id ---
 GetFolderIdDescription = RichToolDescription(
-    description="Get folder id(s) by name within a collection (recursive)",
-    use_when="You have a folder name and need its id inside a collection",
+    description="Find folder id(s) by exact folder name within a collection (recursive)",
+    use_when="You must operate on a folder but only know its name",
 )
 
 # Replaced with per-user variant (previous global version removed)
@@ -747,8 +667,8 @@ async def get_folder_id_per_user(
 
 # --- Tool: get_folder_name ---
 GetFolderNameDescription = RichToolDescription(
-    description="Get folder name by id within a collection",
-    use_when="You have a folder id and need its name",
+    description="Retrieve folder name given its id inside a collection",
+    use_when="You need to present or verify a folder's label from its id",
 )
 
 # Replaced with per-user variant (previous global version removed)
@@ -771,8 +691,9 @@ async def get_folder_name_per_user(
 
 #   --- Tool: add_folder ---
 AddFolderDescription = RichToolDescription(
-    description="Add a folder to a collection",
-    use_when="You want to organize requests within a collection",
+    description="Create a folder (optionally nested) inside a collection",
+    use_when="You want to organize requests hierarchically",
+    side_effects="Adds a new folder node to the collection structure",
 )
 
 # Helper: resolve collection by id or (exact) name
@@ -896,13 +817,172 @@ async def add_request(
     await write_user_json(puch_user_id, 'collections', collections)
     return req.model_dump_json(indent=2)
 
-# --- Tool: update_request ---
-UpdateRequestDescription = RichToolDescription(
-    description="Update a stored request",
-    use_when="You need to modify an existing request",
+# --- Tool: delete_request ---
+DeleteRequestDescription = RichToolDescription(
+    description="Delete a stored request",
+    use_when="You want to remove a request from a collection",
 )
 
-@mcp.tool(description=UpdateRequestDescription.model_dump_json())
+@mcp.tool(description=DeleteRequestDescription.model_dump_json())
+async def delete_request( # type: ignore
+    puch_user_id: Annotated[str, Field(description="User id performing action")],
+    collection_ref: Annotated[str, Field(description="Collection id or name")],
+    request_ref: Annotated[str, Field(description="Request id or exact name (if unique)")],
+) -> str:
+    await require_permission(puch_user_id, A_DELETE)
+    await ensure_user_data(puch_user_id)
+    collections = await read_user_json(puch_user_id, 'collections')
+    col = await _resolve_collection(collections, collection_ref)
+    col_obj = Collection(**col)
+    def remove_from(list_ref: List[StoredRequest]) -> bool:
+        for i, r in enumerate(list_ref):
+            if r.id == request_ref or r.name == request_ref:
+                list_ref.pop(i)
+                return True
+        return False
+    removed = False
+    if remove_from(col_obj.requests):
+        removed = True
+    stack = col_obj.folders.copy()
+    while stack and not removed:
+        f = stack.pop()
+        if remove_from(f.requests):
+            removed = True
+            break
+        stack.extend(f.folders)
+    if not removed:
+        raise McpError(ErrorData(code=INVALID_PARAMS, message="Request not found"))
+    col.update(json.loads(col_obj.model_dump_json()))
+    await write_user_json(puch_user_id, 'collections', collections)
+    return json.dumps({"deleted": request_ref}, indent=2)
+
+@mcp.tool(name="list_requests")
+async def list_requests_per_user(
+    puch_user_id: Annotated[str, Field(description="User id performing action")],
+    collection_ref: Annotated[str, Field(description="Collection id or name")],
+    folder_ref: Annotated[Optional[str], Field(description="Folder id or name (optional)")] = None,
+) -> str:
+    await require_permission(puch_user_id, A_READ)
+    await ensure_user_data(puch_user_id)
+    collections = await read_user_json(puch_user_id, 'collections')
+    col = await _resolve_collection(collections, collection_ref)
+    col_obj = Collection(**col)
+    if folder_ref:
+        target_folder = find_folder(col_obj, folder_ref)
+        if not target_folder:
+            # name search
+            all_folders: List[Folder] = []
+            stack = col_obj.folders.copy()
+            while stack:
+                f = stack.pop()
+                all_folders.append(f)
+                stack.extend(f.folders)
+            named = [f for f in all_folders if f.name == folder_ref]
+            if len(named) == 1:
+                target_folder = named[0]
+            elif len(named) > 1:
+                raise McpError(ErrorData(code=INVALID_PARAMS, message="Folder name ambiguous; use id"))
+            else:
+                raise McpError(ErrorData(code=INVALID_PARAMS, message="Folder not found"))
+        return json.dumps([r.model_dump() for r in target_folder.requests], indent=2)
+    else:
+        return json.dumps([r.model_dump() for r in col_obj.requests], indent=2)
+
+# --- environments per-user ---
+@mcp.tool(name="create_environment")
+async def create_environment_per_user(
+    puch_user_id: Annotated[str, Field(description="User id performing action")],
+    name: Annotated[str, Field(description="Environment name")],
+    variables: Annotated[Dict[str, str], Field(description="Variables map")],
+) -> str:
+    await require_permission(puch_user_id, A_CREATE)
+    await ensure_user_data(puch_user_id)
+    envs = await read_user_json(puch_user_id, 'environments')
+    env = {"id": gen_id(), "name": name, "variables": variables, "createdAt": datetime.now().isoformat()}
+    envs.append(env)
+    await write_user_json(puch_user_id, 'environments', envs)
+    return json.dumps(env, indent=2)
+
+@mcp.tool(name="update_environment")
+async def update_environment_per_user(
+    puch_user_id: Annotated[str, Field(description="User id performing action")],
+    environment_ref: Annotated[str, Field(description="Environment id or name")],
+    variables: Annotated[Dict[str, str], Field(description="Variables to merge")],
+) -> str:
+    await require_permission(puch_user_id, A_UPDATE)
+    await ensure_user_data(puch_user_id)
+    envs = await read_user_json(puch_user_id, 'environments')
+    env = await _resolve_environment(puch_user_id, environment_ref)
+    env['variables'].update(variables)
+    await write_user_json(puch_user_id, 'environments', envs)
+    return json.dumps(env, indent=2)
+
+@mcp.tool(name="delete_environment")
+async def delete_environment_per_user(
+    puch_user_id: Annotated[str, Field(description="User id performing action")],
+    environment_ref: Annotated[str, Field(description="Environment id or name")],
+) -> str:
+    await require_permission(puch_user_id, A_DELETE)
+    await ensure_user_data(puch_user_id)
+    envs = await read_user_json(puch_user_id, 'environments')
+    env = await _resolve_environment(puch_user_id, environment_ref)
+    target_id = env['id']
+    new_envs = [e for e in envs if e.get('id') != target_id]
+    await write_user_json(puch_user_id, 'environments', new_envs)
+    return json.dumps({"deleted": target_id}, indent=2)
+
+@mcp.tool(name="list_environments")
+async def list_environments_per_user(
+    puch_user_id: Annotated[str, Field(description="User id performing action")]
+) -> str:
+    await require_permission(puch_user_id, A_READ)
+    await ensure_user_data(puch_user_id)
+    envs = await read_user_json(puch_user_id, 'environments')
+    return json.dumps(envs, indent=2)
+
+# --- history per-user ---
+@mcp.tool(name="history")
+async def history_per_user(
+    puch_user_id: Annotated[str, Field(description="User id performing action")],
+    limit: Annotated[int, Field(description="Max entries", ge=1, le=100)] = 20,
+) -> str:
+    await require_permission(puch_user_id, A_READ)
+    await ensure_user_data(puch_user_id)
+    entries = await read_user_json(puch_user_id, 'history')
+    return json.dumps(entries[:limit], indent=2)
+
+
+# Helper: resolve environment by id or (unique) name within user namespace (with legacy migration)
+async def _resolve_environment(user_id: str, env_ref: str) -> Dict[str, Any]:
+    envs = await read_user_json(user_id, 'environments')
+    env = next((e for e in envs if e.get('id') == env_ref), None)
+    if env:
+        return env
+    matches = [e for e in envs if e.get('name') == env_ref]
+    if not matches:
+        # attempt legacy migration if empty
+        legacy_envs = await read_json(ENVIRONMENTS_KEY)
+        migrated = False
+        if legacy_envs:
+            existing_ids = {e.get('id') for e in envs}
+            for le in legacy_envs:
+                if le.get('id') not in existing_ids:
+                    envs.append(le)
+                    migrated = True
+            if migrated:
+                await write_user_json(user_id, 'environments', envs)
+            matches = [e for e in envs if e.get('name') == env_ref]
+            if matches:
+                if len(matches) == 1:
+                    return matches[0]
+                raise McpError(ErrorData(code=INVALID_PARAMS, message="Multiple environments share this name; use id"))
+        raise McpError(ErrorData(code=INVALID_PARAMS, message="Environment not found (by id or name)"))
+    if len(matches) > 1:
+        raise McpError(ErrorData(code=INVALID_PARAMS, message="Multiple environments share this name; use id"))
+    return matches[0]
+
+# --- request CRUD per-user ---
+@mcp.tool(name="update_request")
 async def update_request(
     puch_user_id: Annotated[str, Field(description="User id performing action")],
     collection_ref: Annotated[str, Field(description="Collection id or name")],
@@ -974,730 +1054,6 @@ async def update_request(
     await write_user_json(puch_user_id, 'collections', collections)
     return target.model_dump_json(indent=2)
 
-# --- Tool: delete_request ---
-DeleteRequestDescription = RichToolDescription(
-    description="Delete a stored request",
-    use_when="You want to remove a request from a collection",
-)
-
-@mcp.tool(description=DeleteRequestDescription.model_dump_json())
-async def delete_request(
-    puch_user_id: Annotated[str, Field(description="User id performing action")],
-    collection_ref: Annotated[str, Field(description="Collection id or name")],
-    request_ref: Annotated[str, Field(description="Request id or exact name (if unique)")],
-) -> str:
-    await require_permission(puch_user_id, A_DELETE)
-    await ensure_user_data(puch_user_id)
-    collections = await read_user_json(puch_user_id, 'collections')
-    col = await _resolve_collection(collections, collection_ref)
-    col_obj = Collection(**col)
-    def remove_from(list_ref: List[StoredRequest]) -> bool:
-        for i, r in enumerate(list_ref):
-            if r.id == request_ref or r.name == request_ref:
-                list_ref.pop(i)
-                return True
-        return False
-    removed = False
-    if remove_from(col_obj.requests):
-        removed = True
-    stack = col_obj.folders.copy()
-    while stack and not removed:
-        f = stack.pop()
-        if remove_from(f.requests):
-            removed = True
-            break
-        stack.extend(f.folders)
-    if not removed:
-        raise McpError(ErrorData(code=INVALID_PARAMS, message="Request not found"))
-    col.update(json.loads(col_obj.model_dump_json()))
-    await write_user_json(puch_user_id, 'collections', collections)
-    return json.dumps({"deleted": request_ref}, indent=2)
-
-@mcp.tool(name="list_requests")
-async def list_requests_per_user( # type: ignore
-    puch_user_id: Annotated[str, Field(description="User id performing action")],
-    collection_ref: Annotated[str, Field(description="Collection id or name")],
-    folder_ref: Annotated[Optional[str], Field(description="Folder id or name (optional)")]=None,
-) -> str:
-    await require_permission(puch_user_id, A_READ)
-    await ensure_user_data(puch_user_id)
-    collections = await read_user_json(puch_user_id, 'collections')
-    col = await _resolve_collection(collections, collection_ref)
-    col_obj = Collection(**col)
-    if folder_ref:
-        target_folder = find_folder(col_obj, folder_ref)
-        if not target_folder:
-            # name search
-            all_folders: List[Folder] = []
-            stack = col_obj.folders.copy()
-            while stack:
-                f = stack.pop()
-                all_folders.append(f)
-                stack.extend(f.folders)
-            named = [f for f in all_folders if f.name == folder_ref]
-            if len(named) == 1:
-                target_folder = named[0]
-            elif len(named) > 1:
-                raise McpError(ErrorData(code=INVALID_PARAMS, message="Folder name ambiguous; use id"))
-            else:
-                raise McpError(ErrorData(code=INVALID_PARAMS, message="Folder not found"))
-        return json.dumps([r.model_dump() for r in target_folder.requests], indent=2)
-    else:
-        return json.dumps([r.model_dump() for r in col_obj.requests], indent=2)
-
-# --- REPLACED: environments per-user ---
-@mcp.tool(name="create_environment")
-async def create_environment_per_user( # type: ignore
-    puch_user_id: Annotated[str, Field(description="User id performing action")],
-    name: Annotated[str, Field(description="Environment name")],
-    variables: Annotated[Dict[str, str], Field(description="Variables map")],
-) -> str:
-    await require_permission(puch_user_id, A_CREATE)
-    await ensure_user_data(puch_user_id)
-    envs = await read_user_json(puch_user_id, 'environments')
-    env = {"id": gen_id(), "name": name, "variables": variables, "createdAt": datetime.now().isoformat()}
-    envs.append(env)
-    await write_user_json(puch_user_id, 'environments', envs)
-    return json.dumps(env, indent=2)
-
-@mcp.tool(name="update_environment")
-async def update_environment_per_user( # type: ignore
-    puch_user_id: Annotated[str, Field(description="User id performing action")],
-    environment_ref: Annotated[str, Field(description="Environment id or name")],
-    variables: Annotated[Dict[str, str], Field(description="Variables to merge")],
-) -> str:
-    await require_permission(puch_user_id, A_UPDATE)
-    await ensure_user_data(puch_user_id)
-    envs = await read_user_json(puch_user_id, 'environments')
-    env = await _resolve_environment(puch_user_id, environment_ref)
-    env['variables'].update(variables)
-    await write_user_json(puch_user_id, 'environments', envs)
-    return json.dumps(env, indent=2)
-
-@mcp.tool(name="delete_environment")
-async def delete_environment_per_user( # type: ignore
-    puch_user_id: Annotated[str, Field(description="User id performing action")],
-    environment_ref: Annotated[str, Field(description="Environment id or name")],
-) -> str:
-    await require_permission(puch_user_id, A_DELETE)
-    await ensure_user_data(puch_user_id)
-    envs = await read_user_json(puch_user_id, 'environments')
-    env = await _resolve_environment(puch_user_id, environment_ref)
-    target_id = env['id']
-    new_envs = [e for e in envs if e.get('id') != target_id]
-    await write_user_json(puch_user_id, 'environments', new_envs)
-    return json.dumps({"deleted": target_id}, indent=2)
-
-@mcp.tool(name="list_environments")
-async def list_environments_per_user( # type: ignore
-    puch_user_id: Annotated[str, Field(description="User id performing action")]
-) -> str:
-    await require_permission(puch_user_id, A_READ)
-    await ensure_user_data(puch_user_id)
-    envs = await read_user_json(puch_user_id, 'environments')
-    return json.dumps(envs, indent=2)
-
-# --- REPLACED: history per-user ---
-@mcp.tool(name="history")
-async def history_per_user( # type: ignore
-    puch_user_id: Annotated[str, Field(description="User id performing action")],
-    limit: Annotated[int, Field(description="Max entries", ge=1, le=100)] = 20,
-) -> str:
-    await require_permission(puch_user_id, A_READ)
-    await ensure_user_data(puch_user_id)
-    entries = await read_user_json(puch_user_id, 'history')
-    return json.dumps(entries[:limit], indent=2)
-
-
-# Helper: resolve environment by id or (unique) name within user namespace (with legacy migration)
-async def _resolve_environment(user_id: str, env_ref: str) -> Dict[str, Any]:
-    envs = await read_user_json(user_id, 'environments')
-    env = next((e for e in envs if e.get('id') == env_ref), None)
-    if env:
-        return env
-    matches = [e for e in envs if e.get('name') == env_ref]
-    if not matches:
-        # attempt legacy migration if empty
-        legacy_envs = await read_json(ENVIRONMENTS_KEY)
-        migrated = False
-        if legacy_envs:
-            existing_ids = {e.get('id') for e in envs}
-            for le in legacy_envs:
-                if le.get('id') not in existing_ids:
-                    envs.append(le)
-                    migrated = True
-            if migrated:
-                await write_user_json(user_id, 'environments', envs)
-            matches = [e for e in envs if e.get('name') == env_ref]
-            if matches:
-                if len(matches) == 1:
-                    return matches[0]
-                raise McpError(ErrorData(code=INVALID_PARAMS, message="Multiple environments share this name; use id"))
-        raise McpError(ErrorData(code=INVALID_PARAMS, message="Environment not found (by id or name)"))
-    if len(matches) > 1:
-        raise McpError(ErrorData(code=INVALID_PARAMS, message="Multiple environments share this name; use id"))
-    return matches[0]
-
-# --- REPLACED: set_globals / get_globals to per-user ---
-@mcp.tool(name="set_globals")
-async def set_globals_per_user(
-    puch_user_id: Annotated[str, Field(description="User id performing action")],
-    variables: Annotated[Dict[str, str], Field(description="Variables to set (merged)")],
-) -> str:
-    await require_permission(puch_user_id, A_UPDATE)
-    await ensure_user_data(puch_user_id)
-    globals_obj = await read_user_json(puch_user_id, 'globals')
-    globals_obj.setdefault('variables', {}).update(variables)
-    await write_user_json(puch_user_id, 'globals', globals_obj)
-    return json.dumps(globals_obj, indent=2)
-
-@mcp.tool(name="get_globals")
-async def get_globals_per_user(
-    puch_user_id: Annotated[str, Field(description="User id performing action")]
-) -> str:
-    await require_permission(puch_user_id, A_READ)
-    await ensure_user_data(puch_user_id)
-    globals_obj = await read_user_json(puch_user_id, 'globals')
-    return json.dumps(globals_obj, indent=2)
-
-# --- REPLACED: update_collection / delete_collection with per-user scope ---
-@mcp.tool(name="update_collection")
-async def update_collection_per_user(
-    puch_user_id: Annotated[str, Field(description="User id performing action")],
-    collection_ref: Annotated[str, Field(description="Collection id or exact name")],
-    name: Annotated[Optional[str], Field(description="New name for collection")] = None,
-    variables: Annotated[Optional[Dict[str, str]], Field(description="Variables to merge")] = None,
-    auth: Annotated[Optional[AuthConfig], Field(description="New auth config (null to clear)")] = None,
-    clear_auth: Annotated[bool, Field(description="Set true to remove auth")] = False,
-    pre_request_script: Annotated[Optional[str], Field(description="Pre-request script (null to clear)")] = None,
-    clear_pre_request: Annotated[bool, Field(description="Set true to remove pre-request script")] = False,
-    test_script: Annotated[Optional[str], Field(description="Test script (null to clear)")] = None,
-    clear_test: Annotated[bool, Field(description="Set true to remove test script")] = False,
-) -> str:
-    await require_permission(puch_user_id, A_UPDATE)
-    await ensure_user_data(puch_user_id)
-    collections = await read_user_json(puch_user_id, 'collections')
-    col = await _resolve_collection(collections, collection_ref)
-    if name:
-        col['name'] = name
-    if variables:
-        col['variables'] = {**(col.get('variables') or {}), **variables}
-    if clear_auth:
-        col.pop('auth', None)
-    elif auth is not None:
-        col['auth'] = auth.model_dump()
-    if clear_pre_request:
-        col.pop('preRequestScript', None)
-    elif pre_request_script is not None:
-        col['preRequestScript'] = pre_request_script
-    if clear_test:
-        col.pop('testScript', None)
-    elif test_script is not None:
-        col['testScript'] = test_script
-    await write_user_json(puch_user_id, 'collections', collections)
-    return json.dumps(col, indent=2)
-
-@mcp.tool(name="delete_collection")
-async def delete_collection_per_user(
-    puch_user_id: Annotated[str, Field(description="User id performing action")],
-    collection_ref: Annotated[str, Field(description="Collection id or exact name to delete")],
-) -> str:
-    await require_permission(puch_user_id, A_DELETE)
-    await ensure_user_data(puch_user_id)
-    collections = await read_user_json(puch_user_id, 'collections')
-    # resolve to id first
-    col = await _resolve_collection(collections, collection_ref)
-    target_id = col['id']
-    new_cols = [c for c in collections if c.get('id') != target_id]
-    if len(new_cols) == len(collections):
-        raise McpError(ErrorData(code=INVALID_PARAMS, message="Collection not found"))
-    await write_user_json(puch_user_id, 'collections', new_cols)
-    return json.dumps({"deleted": target_id}, indent=2)
-
-# --- New: get_collection_name per-user ---
-@mcp.tool(name="get_collection_name")
-async def get_collection_name_per_user(
-    puch_user_id: Annotated[str, Field(description="User id performing action")],
-    collection_id: Annotated[str, Field(description="Collection id")],
-) -> str:
-    await require_permission(puch_user_id, A_READ)
-    collections = await read_user_json(puch_user_id, 'collections')
-    col = next((c for c in collections if c.get('id') == collection_id), None)
-    if not col:
-        raise McpError(ErrorData(code=INVALID_PARAMS, message="Collection not found"))
-    return json.dumps({"id": col['id'], "name": col['name']}, indent=2)
-
-# --- REPLACED: get_collection_id (per-user, name->ids) ---
-@mcp.tool(name="get_collection_id")
-async def get_collection_id_per_user(
-    puch_user_id: Annotated[str, Field(description="User id performing action")],
-    name: Annotated[str, Field(description="Exact collection name")],
-) -> str:
-    await require_permission(puch_user_id, A_READ)
-    collections = await read_user_json(puch_user_id, 'collections')
-    matches = [c for c in collections if c.get("name") == name]
-    if not matches:
-        raise McpError(ErrorData(code=INVALID_PARAMS, message="Collection name not found"))
-    if len(matches) == 1:
-        return json.dumps({"id": matches[0]["id"], "name": matches[0]["name"]}, indent=2)
-    return json.dumps([{"id": c["id"], "name": c["name"]} for c in matches], indent=2)
-
-# --- REPLACED: request CRUD per-user ---
-@mcp.tool(name="add_request")
-async def add_request_per_user(
-    puch_user_id: Annotated[str, Field(description="User id performing action")],
-    collection_ref: Annotated[str, Field(description="Collection id or name")],
-    name: Annotated[str, Field(description="Request name")],
-    method: Annotated[str, Field(description="HTTP method")],
-    url: Annotated[str, Field(description="Request URL")],
-    headers: Annotated[Optional[Dict[str, str]], Field(description="Headers map")] = None,
-    body: Annotated[Optional[Any], Field(description="Body (json or string)")] = None,
-    folder_ref: Annotated[Optional[str], Field(description="Folder id or name (optional)")] = None,
-    variables: Annotated[Optional[Dict[str, str]], Field(description="Request variables")] = None,
-    auth: Annotated[Optional[AuthConfig], Field(description="Request auth override")] = None,
-    pre_request_script: Annotated[Optional[str], Field(description="Pre-request script")]=None,
-    test_script: Annotated[Optional[str], Field(description="Test script")]=None,
-) -> str:
-    await require_permission(puch_user_id, A_CREATE)
-    await ensure_user_data(puch_user_id)
-    collections = await read_user_json(puch_user_id, 'collections')
-    col = await _resolve_collection(collections, collection_ref)
-    col_obj = Collection(**col)
-    target_folder = None
-    if folder_ref:
-        # allow id or unique name
-            # search by id first
-        target_folder = find_folder(col_obj, folder_ref)
-        if not target_folder:
-            # name search
-            all_folders = []
-            stack = col_obj.folders.copy()
-            while stack:
-                f = stack.pop()
-                all_folders.append(f)
-                stack.extend(f.folders)
-            named = [f for f in all_folders if f.name == folder_ref]
-            if len(named) == 1:
-                target_folder = named[0]
-            elif len(named) > 1:
-                raise McpError(ErrorData(code=INVALID_PARAMS, message="Folder name ambiguous; use id"))
-            else:
-                raise McpError(ErrorData(code=INVALID_PARAMS, message="Folder not found"))
-    req = StoredRequest(
-        id=gen_id(),
-        name=name,
-        method=method.upper(),
-        url=url,
-        headers=headers or {},
-        body=body,
-        createdAt=datetime.now().isoformat(),
-        variables=variables,
-        auth=auth,
-        preRequestScript=pre_request_script,
-        testScript=test_script,
-    )
-    if target_folder:
-        target_folder.requests.append(req)
-        col.update(json.loads(col_obj.model_dump_json()))
-    else:
-        col.setdefault('requests', []).append(json.loads(req.model_dump_json()))
-    await write_user_json(puch_user_id, 'collections', collections)
-    return req.model_dump_json(indent=2)
-
-@mcp.tool(name="update_request")
-async def update_request_per_user(
-    puch_user_id: Annotated[str, Field(description="User id performing action")],
-    collection_ref: Annotated[str, Field(description="Collection id or name")],
-    request_ref: Annotated[str, Field(description="Request id or exact name (if unique)")],
-    name: Annotated[Optional[str], Field(description="New name")]=None,
-    method: Annotated[Optional[str], Field(description="New HTTP method")]=None,
-    url: Annotated[Optional[str], Field(description="New URL")]=None,
-    headers: Annotated[Optional[Dict[str, str]], Field(description="New headers")]=None,
-    body: Annotated[Optional[Any], Field(description="New body")]=None,
-    variables: Annotated[Optional[Dict[str, str]], Field(description="Variables to merge")]=None,
-    clear_variables: Annotated[bool, Field(description="If true, reset variables before merge")]=False,
-    auth: Annotated[Optional[AuthConfig], Field(description="Auth override")]=None,
-    clear_auth: Annotated[bool, Field(description="Remove auth if true")]=False,
-    pre_request_script: Annotated[Optional[str], Field(description="Set pre-request script")]=None,
-    clear_pre_request: Annotated[bool, Field(description="Remove pre-request script if true")]=False,
-    test_script: Annotated[Optional[str], Field(description="Set test script")]=None,
-    clear_test: Annotated[bool, Field(description="Remove test script if true")]=False,
-) -> str:
-    await require_permission(puch_user_id, A_UPDATE)
-    await ensure_user_data(puch_user_id)
-    collections = await read_user_json(puch_user_id, 'collections')
-    col = await _resolve_collection(collections, collection_ref)
-    col_obj = Collection(**col)
-    # gather all requests
-    all_requests: List[StoredRequest] = []
-    all_requests.extend(col_obj.requests)
-    stack = col_obj.folders.copy()
-    while stack:
-        f = stack.pop()
-        all_requests.extend(f.requests)
-        stack.extend(f.folders)
-    target = next((r for r in all_requests if r.id == request_ref), None)
-    if not target:
-        named = [r for r in all_requests if r.name == request_ref]
-        if len(named) == 1:
-            target = named[0]
-        elif len(named) > 1:
-            raise McpError(ErrorData(code=INVALID_PARAMS, message="Request name ambiguous; use id"))
-    if not target:
-        raise McpError(ErrorData(code=INVALID_PARAMS, message="Request not found"))
-    if name is not None:
-        target.name = name
-    if method is not None:
-        target.method = method.upper()
-    if url is not None:
-        target.url = url
-    if headers is not None:
-        target.headers = headers
-    if body is not None:
-        target.body = body
-    if clear_variables:
-        target.variables = {}
-    if variables:
-        target.variables = {**(target.variables or {}), **variables}
-    if clear_auth:
-        target.auth = None
-    elif auth is not None:
-        target.auth = auth
-    if clear_pre_request:
-        target.preRequestScript = None
-    elif pre_request_script is not None:
-        target.preRequestScript = pre_request_script
-    if clear_test:
-        target.testScript = None
-    elif test_script is not None:
-        target.testScript = test_script
-    # persist
-    col.update(json.loads(col_obj.model_dump_json()))
-    await write_user_json(puch_user_id, 'collections', collections)
-    return target.model_dump_json(indent=2)
-
-@mcp.tool(name="delete_request")
-async def delete_request_per_user(
-    puch_user_id: Annotated[str, Field(description="User id performing action")],
-    collection_ref: Annotated[str, Field(description="Collection id or name")],
-    request_ref: Annotated[str, Field(description="Request id or exact name (if unique)")],
-) -> str:
-    await require_permission(puch_user_id, A_DELETE)
-    await ensure_user_data(puch_user_id)
-    collections = await read_user_json(puch_user_id, 'collections')
-    col = await _resolve_collection(collections, collection_ref)
-    col_obj = Collection(**col)
-    def remove_from(list_ref: List[StoredRequest]) -> bool:
-        for i, r in enumerate(list_ref):
-            if r.id == request_ref or r.name == request_ref:
-                list_ref.pop(i)
-                return True
-        return False
-    removed = False
-    if remove_from(col_obj.requests):
-        removed = True
-    stack = col_obj.folders.copy()
-    while stack and not removed:
-        f = stack.pop()
-        if remove_from(f.requests):
-            removed = True
-            break
-        stack.extend(f.folders)
-    if not removed:
-        raise McpError(ErrorData(code=INVALID_PARAMS, message="Request not found"))
-    col.update(json.loads(col_obj.model_dump_json()))
-    await write_user_json(puch_user_id, 'collections', collections)
-    return json.dumps({"deleted": request_ref}, indent=2)
-
-@mcp.tool(name="list_requests")
-async def list_requests_per_user(
-    puch_user_id: Annotated[str, Field(description="User id performing action")],
-    collection_ref: Annotated[str, Field(description="Collection id or name")],
-    folder_ref: Annotated[Optional[str], Field(description="Folder id or name (optional)")]=None,
-) -> str:
-    await require_permission(puch_user_id, A_READ)
-    await ensure_user_data(puch_user_id)
-    collections = await read_user_json(puch_user_id, 'collections')
-    col = await _resolve_collection(collections, collection_ref)
-    col_obj = Collection(**col)
-    if folder_ref:
-        target_folder = find_folder(col_obj, folder_ref)
-        if not target_folder:
-            # name search
-            all_folders: List[Folder] = []
-            stack = col_obj.folders.copy()
-            while stack:
-                f = stack.pop()
-                all_folders.append(f)
-                stack.extend(f.folders)
-            named = [f for f in all_folders if f.name == folder_ref]
-            if len(named) == 1:
-                target_folder = named[0]
-            elif len(named) > 1:
-                raise McpError(ErrorData(code=INVALID_PARAMS, message="Folder name ambiguous; use id"))
-            else:
-                raise McpError(ErrorData(code=INVALID_PARAMS, message="Folder not found"))
-        return json.dumps([r.model_dump() for r in target_folder.requests], indent=2)
-    else:
-        return json.dumps([r.model_dump() for r in col_obj.requests], indent=2)
-
-# --- REPLACED: environments per-user ---
-@mcp.tool(name="create_environment")
-async def create_environment_per_user(
-    puch_user_id: Annotated[str, Field(description="User id performing action")],
-    name: Annotated[str, Field(description="Environment name")],
-    variables: Annotated[Dict[str, str], Field(description="Variables map")],
-) -> str:
-    await require_permission(puch_user_id, A_CREATE)
-    await ensure_user_data(puch_user_id)
-    envs = await read_user_json(puch_user_id, 'environments')
-    env = {"id": gen_id(), "name": name, "variables": variables, "createdAt": datetime.now().isoformat()}
-    envs.append(env)
-    await write_user_json(puch_user_id, 'environments', envs)
-    return json.dumps(env, indent=2)
-
-@mcp.tool(name="update_environment")
-async def update_environment_per_user(
-    puch_user_id: Annotated[str, Field(description="User id performing action")],
-    environment_ref: Annotated[str, Field(description="Environment id or name")],
-    variables: Annotated[Dict[str, str], Field(description="Variables to merge")],
-) -> str:
-    await require_permission(puch_user_id, A_UPDATE)
-    await ensure_user_data(puch_user_id)
-    envs = await read_user_json(puch_user_id, 'environments')
-    env = await _resolve_environment(puch_user_id, environment_ref)
-    env['variables'].update(variables)
-    await write_user_json(puch_user_id, 'environments', envs)
-    return json.dumps(env, indent=2)
-
-@mcp.tool(name="delete_environment")
-async def delete_environment_per_user(
-    puch_user_id: Annotated[str, Field(description="User id performing action")],
-    environment_ref: Annotated[str, Field(description="Environment id or name")],
-) -> str:
-    await require_permission(puch_user_id, A_DELETE)
-    await ensure_user_data(puch_user_id)
-    envs = await read_user_json(puch_user_id, 'environments')
-    env = await _resolve_environment(puch_user_id, environment_ref)
-    target_id = env['id']
-    new_envs = [e for e in envs if e.get('id') != target_id]
-    await write_user_json(puch_user_id, 'environments', new_envs)
-    return json.dumps({"deleted": target_id}, indent=2)
-
-@mcp.tool(name="list_environments")
-async def list_environments_per_user(
-    puch_user_id: Annotated[str, Field(description="User id performing action")]
-) -> str:
-    await require_permission(puch_user_id, A_READ)
-    await ensure_user_data(puch_user_id)
-    envs = await read_user_json(puch_user_id, 'environments')
-    return json.dumps(envs, indent=2)
-
-# --- REPLACED: history per-user ---
-@mcp.tool(name="history")
-async def history_per_user(
-    puch_user_id: Annotated[str, Field(description="User id performing action")],
-    limit: Annotated[int, Field(description="Max entries", ge=1, le=100)] = 20,
-) -> str:
-    await require_permission(puch_user_id, A_READ)
-    await ensure_user_data(puch_user_id)
-    # FIX: previously passed numeric limit as 'kind' causing KeyError. Retrieve 'history' then slice.
-    entries = await read_user_json(puch_user_id, 'history')
-    return json.dumps(entries[:limit], indent=2)
-
-@mcp.tool(name="export_collection")
-async def export_collection_per_user(
-    puch_user_id: Annotated[str, Field(description="User id performing action")],
-    collection_ref: Annotated[str, Field(description="Collection id or name")],
-) -> str:
-    await require_permission(puch_user_id, A_EXPORT)
-    await ensure_user_data(puch_user_id)
-    collections = await read_user_json(puch_user_id, 'collections')
-    col = await _resolve_collection(collections, collection_ref)
-    col_obj = Collection(**col)
-
-    def map_request(r: StoredRequest) -> Dict[str, Any]:
-        body_block = None
-        if r.body is not None:
-            if isinstance(r.body, dict):
-                body_block = {"mode": "raw", "raw": json.dumps(r.body)}
-            else:
-                body_block = {"mode": "raw", "raw": str(r.body)}
-        return {
-            "name": r.name,
-            "request": {
-                "method": r.method,
-                "header": [{"key": k, "value": v} for k, v in r.headers.items()],
-                "url": r.url,
-                "body": body_block,
-            },
-            "_mcp": {
-                "id": r.id,
-                "variables": r.variables,
-                "auth": r.auth.model_dump() if r.auth else None,
-                "preRequestScript": r.preRequestScript,
-                "testScript": r.testScript,
-            },
-        }
-
-    def map_folder(f: Folder) -> Dict[str, Any]:
-        return {
-            "name": f.name,
-            "item": [map_request(r) for r in f.requests] + [map_folder(sf) for sf in f.folders],
-            "_mcp": {
-                "id": f.id,
-                "variables": f.variables,
-            },
-        }
-
-    exported = {
-        "info": {
-            "name": col_obj.name,
-            "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-            "description": col.get("description"),
-            "_postman_id": col_obj.id,  # optional compatibility
-        },
-        "item": [map_request(r) for r in col_obj.requests] + [map_folder(f) for f in col_obj.folders],
-        "variable": [{"key": k, "value": v} for k, v in (col_obj.variables or {}).items()],
-        "_mcp": {
-            "id": col_obj.id,
-            "auth": col_obj.auth.model_dump() if col_obj.auth else None,
-            "preRequestScript": col_obj.preRequestScript,
-            "testScript": col_obj.testScript,
-        },
-    }
-    return json.dumps(exported, indent=2)
-
-@mcp.tool(name="import_postman_collection")
-async def import_postman_collection_per_user(
-    puch_user_id: Annotated[str, Field(description="User id performing action")],
-    json_data: Annotated[str, Field(description="Postman collection JSON (single, bundle, or list)")],
-    overwrite_name: Annotated[Optional[str], Field(description="Force a name for single collection (ignored for bundles)")] = None,
-) -> str:
-    await require_permission(puch_user_id, A_IMPORT)
-    await ensure_user_data(puch_user_id)
-
-    if not json_data or not json_data.strip():
-        raise McpError(ErrorData(code=INVALID_PARAMS, message="Empty JSON payload"))
-
-    try:
-        parsed = json.loads(json_data)
-    except json.JSONDecodeError as e:
-        raise McpError(ErrorData(code=INVALID_PARAMS, message=f"Invalid JSON: {e.msg}"))
-
-    if isinstance(parsed, dict) and "item" in parsed:
-        raw_collections = [parsed]
-    elif isinstance(parsed, dict) and isinstance(parsed.get("collections"), list):
-        raw_collections = [c for c in parsed["collections"] if isinstance(c, dict) and "item" in c]
-    elif isinstance(parsed, list):
-        raw_collections = [c for c in parsed if isinstance(c, dict) and "item" in c]
-    else:
-        raise McpError(ErrorData(code=INVALID_PARAMS, message="Unsupported format (expected single collection, {collections:[]}, or list)"))
-
-    if not raw_collections:
-        raise McpError(ErrorData(code=INVALID_PARAMS, message="No collection objects found"))
-
-    existing = await read_user_json(puch_user_id, 'collections')
-    if not isinstance(existing, list):
-        existing = []
-
-    def normalize_headers(request_dict: Dict[str, Any]) -> Dict[str, str]:
-        hdrs = request_dict.get("header") or request_dict.get("headers") or []
-        out: Dict[str, str] = {}
-        for h in hdrs:
-            if isinstance(h, dict):
-                k = h.get("key") or h.get("name")
-                if k:
-                    out[k] = "" if h.get("value") is None else str(h.get("value"))
-        return out
-
-    def extract_body(req_block: Dict[str, Any]) -> Any:
-        body = req_block.get("body")
-        if not body:
-            return None
-        mode = body.get("mode")
-        if mode == "raw":
-            return body.get("raw")
-        # Fallback: store whole structure
-        return body
-
-    def to_request(node: Dict[str, Any]) -> Dict[str, Any]:
-        req_block = node.get("request") or {}
-        method = (req_block.get("method") or node.get("method") or "GET").upper()
-        url = req_block.get("url") or node.get("url") or ""
-        if isinstance(url, dict):
-            url = url.get("raw") or ""
-        meta = node.get("_mcp", {})
-        return {
-            "id": meta.get("id") or node.get("id") or gen_id(),
-            "name": node.get("name") or "Untitled Request",
-            "method": method,
-            "url": url,
-            "headers": normalize_headers(req_block),
-            "body": extract_body(req_block),
-            "createdAt": datetime.now(timezone.utc).isoformat(),
-            "variables": meta.get("variables") or {},
-            "auth": meta.get("auth"),
-            "preRequestScript": meta.get("preRequestScript"),
-            "testScript": meta.get("testScript"),
-        }
-
-    def to_folder(node: Dict[str, Any]) -> Dict[str, Any]:
-        children = node.get("item") or []
-        meta = node.get("_mcp", {})
-        folder_obj = {
-            "id": meta.get("id") or node.get("id") or gen_id(),
-            "name": node.get("name") or "Folder",
-            "folders": [],
-            "requests": [],
-            "createdAt": datetime.now(timezone.utc).isoformat(),
-            "variables": meta.get("variables"),
-        }
-        for child in children:
-            if not isinstance(child, dict):
-                continue
-            if "item" in child and "request" not in child:
-                folder_obj["folders"].append(to_folder(child))
-            else:
-                folder_obj["requests"].append(to_request(child))
-        return folder_obj
-
-    imported = 0
-    for rc in raw_collections:
-        items = rc.get("item")
-        if not isinstance(items, list):
-            continue
-        info = rc.get("info") or {}
-        meta = rc.get("_mcp", {})
-        name = overwrite_name if (overwrite_name and len(raw_collections) == 1) else (info.get("name") or "Imported Collection")
-        col_obj = {
-            "id": meta.get("id") or info.get("_postman_id") or info.get("id") or gen_id(),
-            "name": name,
-            "description": info.get("description"),
-            "folders": [],
-            "requests": [],
-            "createdAt": datetime.now(timezone.utc).isoformat(),
-            "variables": {v["key"]: v["value"] for v in (rc.get("variable") or []) if isinstance(v, dict) and "key" in v},
-            "auth": meta.get("auth"),
-            "preRequestScript": meta.get("preRequestScript"),
-            "testScript": meta.get("testScript"),
-        }
-        for element in items:
-            if not isinstance(element, dict):
-                continue
-            if "item" in element and "request" not in element:
-                col_obj["folders"].append(to_folder(element))
-            else:
-                col_obj["requests"].append(to_request(element))
-        existing.append(col_obj)
-        imported += 1
-
-    if imported == 0:
-        raise McpError(ErrorData(code=INVALID_PARAMS, message="No collections imported"))
-
-    await write_user_json(puch_user_id, 'collections', existing)
-    return json.dumps({"imported": imported, "totalCollections": len(existing)}, indent=2)
-
 
 # --- Diagnostic tool: list_folders ---
 ListFoldersDescription = RichToolDescription(
@@ -1748,9 +1104,9 @@ async def list_folders(
 
 # --- Tool: move_folder ---
 MoveFolderDescription = RichToolDescription(
-    description="Move a folder to another collection or different parent folder",
-    use_when="You need to reorganize folder structure across collections",
-    side_effects="Changes folder hierarchy and collection contents",
+    description="Relocate a folder to another collection or different parent folder",
+    use_when="You are refactoring collection structure or consolidating folders",
+    side_effects="Mutates both source and target collection trees",
 )
 
 @mcp.tool(description=MoveFolderDescription.model_dump_json())

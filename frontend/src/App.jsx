@@ -12,7 +12,7 @@ const MCPReqForgeDocs = () => {
             Redis backend, and full API testing capabilities.
           </p>
           <div className="server-info">
-            <span className="info-badge">🛡️ Id: Each user unique and isolated data</span>
+            <span className="info-badge">🆔 Data: Per‑user isolated workspace</span>
             <span className="info-badge">🔐 Auth: Bearer Token</span>
             <span className="info-badge">📊 Storage: Redis Backend</span>
           </div>
@@ -161,11 +161,11 @@ const MCPReqForgeDocs = () => {
                 </div>
                 <div className="tool-item">
                   <span className="tool-name">export_collection</span>
-                  <span className="tool-desc">Generate ReqForge-compatible JSON exports for sharing</span>
+                  <span className="tool-desc">Export a collection to portable JSON (coming soon if not enabled)</span>
                 </div>
                 <div className="tool-item">
-                  <span className="tool-name">import_ReqForge_collection</span>
-                  <span className="tool-desc">Import existing ReqForge collections with full fidelity</span>
+                  <span className="tool-name">import_postman_collection</span>
+                  <span className="tool-desc">Import a Postman/ReqForge JSON collection (coming soon if not enabled)</span>
                 </div>
                 <div className="tool-item">
                   <span className="tool-name">validate</span>
@@ -176,7 +176,7 @@ const MCPReqForgeDocs = () => {
 
             <div className="feature-category">
               <div className="category-header">
-                <h3>👤 User Management & Security (implemented but no used until team collaboration not implemented)</h3>
+                <h3>👤 User Management & Security (RBAC foundation ready; multi‑user UI coming)</h3>
                 <p>Role-based access control with fine-grained permissions</p>
               </div>
               <div className="tools-list">
@@ -274,9 +274,9 @@ const MCPReqForgeDocs = () => {
                 <h3>Chat with Our MCP Server</h3>
                 <p>Start chatting and access all MCP tools directly through WhatsApp interface</p>
                 <div className="features-highlight">
-                  <span>✨ All 27 MCP tools available</span>
+                  <span>✨ Core MCP tools available</span>
                   <span>🔐 Secure RBAC authentication</span>
-                  <span>📊 Real-time Redis backend</span>
+                  <span>📊 Redis persistence</span>
                 </div>
               </div>
             </div>
