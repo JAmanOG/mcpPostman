@@ -547,30 +547,12 @@ async def send_request(
             await asyncio.sleep(retry_backoff_ms / 1000)
 
     elapsed = int((time.time() - started_total) * 1000)
-    history_entry = {
-        "id": gen_id(),
-        "request": {
-            "method": req_resolved['method'],
-            "url": req_resolved['url'],
-            "headers": headers_with_auth,
-            "body": req_resolved.get('body'),
-        },
-        "response": response_obj,
-        "startedAt": datetime.now().isoformat(),
-        "durationMs": elapsed,
-        "tests": tests,
-        "console": console_logs,
-        "attempts": attempt,
-        "lastError": last_error,
-    }
-    # Atomic append (no race) + legacy migration (remove old array growth code)
-    await append_history_entry(puch_user_id, history_entry)
-    return json.dumps({
-        "response": response_obj,
-        "attempts": attempt,
-        "lastError": last_error,
-        "resolvedUrl": req_resolved['url']
-    }, indent=2)
+    history = await read_user_json(puch_user_id, 'history')
+    history.insert(0, {"id": gen_id(), "request": {"method": req_resolved['method'], "url": req_resolved['url'], "headers": headers_with_auth, "body": req_resolved.get('body')}, "response": response_obj, "startedAt": datetime.now().isoformat(), "durationMs": elapsed, "tests": tests, "console": console_logs, "attempts": attempt, "lastError": last_error})
+    while len(history) > 200:
+        history.pop()
+    await write_user_json(puch_user_id, 'history', history)
+    return json.dumps({"response": response_obj, "attempts": attempt, "lastError": last_error, "resolvedUrl": req_resolved['url']}, indent=2)
 
 @mcp.tool(description=GetGlobalsDescription.model_dump_json())
 async def get_globals() -> str:
